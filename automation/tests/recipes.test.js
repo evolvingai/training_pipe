@@ -56,6 +56,17 @@ test('classifier recipes expose the detector-parity lifecycle', () => {
   const tune = buildRecipe('classifier_tune', { name: 'species-tune', data: '/data/species' }, defaults);
   assert.ok(tune.commands[0].argv.includes('tune'));
   assert.ok(tune.commands[0].argv.includes('iterations=10'));
+
+  const xai = buildRecipe('classifier_xai', {
+    name: 'species-xai', source: '/data/species/val', checkpoint: '/runs/species/weights/best.pt',
+    target: 'salmon', maxImages: 12, activationChannels: 4,
+  }, defaults);
+  assert.ok(xai.commands[0].argv.includes('xai'));
+  assert.ok(xai.commands[0].argv.includes('task=classification'));
+  assert.ok(xai.commands[0].argv.includes('target=salmon'));
+  assert.ok(xai.commands[0].argv.includes('max_images=12'));
+  assert.ok(xai.commands[0].argv.includes('activation_channels=4'));
+  assert.deepEqual(xai.artifacts, ['/runs/species-xai']);
 });
 
 test('video/action recipes expose clip sampling and a CPU-safe default', () => {

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import cv2
@@ -65,6 +66,22 @@ def test_classifier_one_epoch_cpu_smoke(tmp_path):
     assert (output / "weights" / "best.pt").is_file()
     assert (output / "logs" / "history.csv").is_file()
     assert (output / "reports" / "report.html").is_file()
+
+    xai_output = tmp_path / "classifier_xai"
+    assert main([
+        "xai", "task=classification", f"source={data}",
+        f"checkpoint={output / 'weights' / 'best.pt'}", f"output={xai_output}",
+        "max_images=2", "activation_channels=2", "device=cpu",
+    ]) == 0
+    manifest = json.loads((xai_output / "xai" / "manifest.json").read_text())
+    assert manifest["format"] == "trainer-classification-xai-v1"
+    assert manifest["architecture"] == "convnext-tiny"
+    assert len(manifest["images"]) == 2
+    assert "red supports" in manifest["method"]
+    assert (xai_output / manifest["images"][0]["overlay"]).is_file()
+    assert (xai_output / manifest["images"][0]["activations"]).is_file()
+    assert (xai_output / manifest["images"][0]["dossier"]).is_file()
+    assert (xai_output / "reports" / "xai.html").is_file()
 
 
 def test_classifier_matches_detector_lifecycle_on_cpu(tmp_path):

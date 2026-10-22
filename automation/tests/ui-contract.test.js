@@ -23,6 +23,9 @@ test('all four Trainer families expose independent workflows', () => {
   assert.match(app, /classifier_tune_/);
   assert.match(app, /Early-stop patience/);
   assert.match(app, /Thresholds JSON/);
+  assert.match(app, /\['xai', 'xAI'\]/);
+  assert.match(app, /SIGNED GRAD-CAM|signed Grad-CAM/i);
+  assert.match(app, /Channels per stage/);
   assert.match(app, /data-type="video_\$\{mode\}"/);
   assert.match(app, /data-type="vlm_tune"/);
   assert.match(app, /data-type="vlm_merge"/);
@@ -51,5 +54,8 @@ test('registry and xAI flows are available to every Trainer family', () => {
   assert.match(app, /renderEvidence/);
   assert.match(app, /Mask\/background diagnostics/);
   assert.match(app, /bindEvidenceImageRetry/);
+  assert.match(app, /drawClassificationGradcam/);
+  assert.match(app, /Activation intensity/);
+  assert.match(app, /Red supports the selected class; blue opposes it/i);
   assert.match(app, /setTimeout\(resolve, 350\)/);
 });

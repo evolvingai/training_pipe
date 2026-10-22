@@ -112,6 +112,7 @@ export const recipeCatalog = [
   { type: 'classifier_finetune', label: 'Classifier · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'freeze', 'device', 'project'] },
   { type: 'classifier_evaluate', label: 'Classifier · evaluate/report', fields: ['data', 'checkpoint', 'batch', 'device', 'project'] },
   { type: 'classifier_predict', label: 'Classifier · predict', fields: ['source', 'checkpoint', 'batch', 'device', 'project'] },
+  { type: 'classifier_xai', label: 'Classifier · signed Grad-CAM + activations', fields: ['source', 'checkpoint', 'target', 'maxImages', 'device', 'project'] },
   { type: 'classifier_export', label: 'Classifier · export ONNX', fields: ['checkpoint', 'device', 'project'] },
   { type: 'classifier_tune', label: 'Classifier · tune', fields: ['data', 'arch', 'iterations', 'tuneEpochs', 'device', 'project'] },
   { type: 'classifier_tune-thresh', label: 'Classifier · tune thresholds', fields: ['data', 'checkpoint', 'device', 'project'] },
@@ -243,6 +244,14 @@ export function buildRecipe(type, input = {}, defaults) {
       if (p.thresholds) argv.push(`thresholds=${text(p.thresholds, 'thresholds')}`);
       argv.push(`conf=${number(p.conf, 'conf', 0, 0, 1)}`, `topk=${integer(p.topk, 'topk', 3, 1, 1000)}`);
       commands = [command(action, 'Classifier predict', cwd, argv)];
+    } else if (action === 'xai') {
+      const argv = base('xai');
+      argv.push(`source=${text(p.source, 'source')}`, `checkpoint=${text(p.checkpoint, 'checkpoint')}`,
+        `target=${text(p.target || 'predicted', 'target')}`,
+        `max_images=${integer(p.maxImages, 'maxImages', 24, 1, 1000)}`,
+        `activation_channels=${integer(p.activationChannels, 'activationChannels', 4, 1, 16)}`,
+        `intensity=${number(p.intensity, 'intensity', 0.72, 0.05, 1)}`);
+      commands = [command(action, 'Classifier signed Grad-CAM and feature activations', cwd, argv)];
     } else if (action === 'export') {
       const argv = base('export');
       argv.push(`checkpoint=${text(p.checkpoint, 'checkpoint')}`);

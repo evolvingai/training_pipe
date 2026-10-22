@@ -55,6 +55,12 @@ trainer predict task=classification source=/data/incoming \
   checkpoint=/runs/species/weights/best.pt \
   thresholds=/runs/species-eval/thresholds.json project=/runs name=species-predict
 
+# Signed Grad-CAM and ConvNeXt stage activations. The target can be
+# "predicted", a class name, or a zero-based class index.
+trainer xai task=classification source=/data/incoming \
+  checkpoint=/runs/species/weights/best.pt project=/runs name=species-xai \
+  target=predicted max_images=24 activation_channels=4 intensity=0.72
+
 # Hyperparameter trials, augmentation visualization, and data throughput
 trainer tune task=classification arch=convnext-tiny data=/data/species \
   project=/runs name=species-tune iterations=10 tune_epochs=5
@@ -81,6 +87,11 @@ run/
   plots/loss_curve.png
   plots/accuracy_curve.png
   reports/report.html
+  reports/xai.html           # searchable classification xAI gallery
+  xai/manifest.json          # method, scores, targets, layers, and artifact paths
+  xai/gradcam/               # raw signed maps and red/blue overlays
+  xai/activations/           # highest-energy channels at every ConvNeXt stage
+  xai/dossiers/              # model input + overlay + activation montage
   classes.json
   metrics.json
 ```
@@ -97,3 +108,10 @@ transforms are shared with detection; Mosaic, MixUp, and box-free CopyPaste
 Evaluation reports accuracy, macro precision/recall/F1, per-class
 precision/recall/F1/support, TP/FP/FN/TN counts, the complete confusion matrix,
 and per-image predictions.
+
+The classification xAI flow mirrors the signed Grad-CAM convention used by the
+fish tooling: red regions support the selected class logit and blue regions
+oppose it. The raw signed map is retained alongside the rendered overlay. For
+ConvNeXt, Trainer also captures every feature stage and exports its strongest
+activation channels. These are explanations of the checkpoint response, not
+segmentation masks or causal proof.

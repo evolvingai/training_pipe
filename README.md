@@ -14,7 +14,7 @@ the identity of the framework.
 | Family | Train | Evaluate | Predict | Deploy artifact |
 |---|---:|---:|---:|---|
 | Detection | yes | yes + report | yes | ONNX / TensorRT |
-| Image classification | yes + resume/finetune/tune | yes + thresholds/report | yes + top-k/rejection | ONNX + class contract |
+| Image classification | yes + resume/finetune/tune | yes + thresholds/report | yes + top-k/rejection/xAI | ONNX + class contract |
 | Video/action classification | yes | yes | yes | ONNX + clip contract |
 | VLM | PEFT LoRA | training metrics | — | adapter or merged model |
 

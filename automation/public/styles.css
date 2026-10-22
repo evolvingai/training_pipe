@@ -340,9 +340,24 @@ tr.clickable:hover td { background: rgba(255, 255, 255, 0.04); }
 .evidence-preview.failed span { display: block; }
 .evidence-card.mask-diagnostic { border-color: rgba(255,214,10,.24); }
 .evidence-card.xai { border-color: rgba(100,210,255,.24); }
+.classification-xai-live { margin-bottom: 18px; border-color: rgba(100,210,255,.28); }
+.classification-xai-live h3 { margin: 4px 0 5px; font-size: 19px; }
+.classification-xai-controls { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(220px, .8fr); gap: 14px; margin: 16px 0; }
+.classification-xai-controls .field { margin: 0; }
+.classification-xai-controls input[type="range"] { padding: 0; accent-color: var(--accent); }
+.classification-xai-stage { display: grid; grid-template-columns: minmax(280px, .9fr) minmax(340px, 1.1fr); gap: 14px; }
+.classification-xai-stage figure { margin: 0; min-height: 260px; background: rgba(0,0,0,.26); border: 1px solid var(--stroke-soft); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; justify-content: center; }
+.classification-xai-stage canvas, .classification-xai-stage img { display: block; width: 100%; max-height: 560px; object-fit: contain; }
+.classification-xai-stage figcaption { padding: 9px 12px; color: var(--muted); font-size: 10px; border-top: 1px solid var(--stroke-soft); }
+.classification-xai-map.loading canvas { opacity: .45; }
+.classification-xai-map.failed::before { content: 'Unable to render signed map'; color: var(--danger); padding: 30px; text-align: center; }
+.classification-xai-map.failed canvas { display: none; }
+.classification-xai-scores { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
+.classification-xai-scores span { padding: 6px 9px; background: rgba(255,255,255,.045); border: 1px solid var(--stroke-soft); border-radius: 999px; color: var(--muted); font-size: 10px; }
+.classification-xai-scores strong { color: var(--text); }
 
 @media (max-width: 900px) {
-  .grid2, .adv-grid, .model-registry-kpis, .model-registry-grid, .evidence-grid, .model-registry-tools, .evidence-tools { grid-template-columns: 1fr; }
+  .grid2, .adv-grid, .model-registry-kpis, .model-registry-grid, .evidence-grid, .model-registry-tools, .evidence-tools, .classification-xai-controls, .classification-xai-stage { grid-template-columns: 1fr; }
   .sidebar { width: 190px; }
   main { padding: 30px 24px; }
   .model-registry-head { flex-direction: column; }

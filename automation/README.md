@@ -38,6 +38,9 @@ the same plugin registry.
   outputs, augmentation previews, saliency/activation maps, and mask/background
   diagnostics. GET requests and failed preview images retry once before showing a
   recoverable error.
+- ConvNeXt classification xAI that writes signed Grad-CAM overlays (red supports
+  the selected class; blue opposes it), per-stage top activation channels,
+  combined dossiers, a searchable HTML gallery, and an auditable JSON manifest.
 
 The control plane creates fixed argument arrays. The agent uses `spawn()` with
 `shell: false`; job parameters are never evaluated by a shell.

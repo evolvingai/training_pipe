@@ -582,6 +582,23 @@ def predict(args: argparse.Namespace) -> int:
     return 0
 
 
+def xai(args: argparse.Namespace) -> int:
+    from trainer.classification.xai import generate_xai
+
+    device = select_device(args.device)
+    model, payload = load_checkpoint(Path(args.checkpoint), device)
+    result = generate_xai(
+        model, payload, source_images(Path(args.source)), Path(args.output), device,
+        target=args.target, max_images=args.max_images, intensity=args.intensity,
+        activation_channels=args.activation_channels,
+    )
+    print(json.dumps({
+        "architecture": result["architecture"], "images": len(result["images"]),
+        "gallery": result["gallery"], "method": result["method"],
+    }, indent=2))
+    return 0
+
+
 def export(args: argparse.Namespace) -> int:
     device = select_device(args.device)
     model, payload = load_checkpoint(Path(args.checkpoint), device)
@@ -820,6 +837,16 @@ def parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--thresholds", default="")
     predict_parser.add_argument("--topk", type=int, default=3)
 
+    xai_parser = sub.add_parser("xai")
+    xai_parser.add_argument("--source", required=True)
+    xai_parser.add_argument("--checkpoint", required=True)
+    xai_parser.add_argument("--output", required=True)
+    xai_parser.add_argument("--device", default="auto")
+    xai_parser.add_argument("--target", default="predicted")
+    xai_parser.add_argument("--max-images", type=int, default=24)
+    xai_parser.add_argument("--intensity", type=float, default=0.72)
+    xai_parser.add_argument("--activation-channels", type=int, default=4)
+
     export_parser = sub.add_parser("export")
     export_parser.add_argument("--checkpoint", required=True)
     export_parser.add_argument("--output", required=True)
@@ -865,14 +892,14 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parser().parse_args(argv)
     handlers = {
         "train": train, "finetune": train, "evaluate": evaluate, "val": evaluate,
-        "predict": predict, "export": export, "tune": tune, "tune-thresh": tune_thresholds,
+        "predict": predict, "xai": xai, "export": export, "tune": tune, "tune-thresh": tune_thresholds,
         "report": report, "viz-augment": viz_augment, "bench-data": bench_data,
     }
     return handlers[args.command](args)
 
 
 __all__ = [
-    "bench_data", "evaluate", "evaluate_model", "export", "load_checkpoint", "main", "predict",
+    "bench_data", "evaluate", "evaluate_model", "export", "load_checkpoint", "main", "predict", "xai",
     "report", "run_training", "train", "tune", "tune_thresholds", "viz_augment", "write_report",
 ]
 

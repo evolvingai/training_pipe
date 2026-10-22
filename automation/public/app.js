@@ -337,13 +337,14 @@ function classificationForm(mode) {
   const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
   const names = {
     train: `classifier_train_${stamp}`, finetune: `classifier_finetune_${stamp}`,
-    evaluate: `classifier_eval_${stamp}`, predict: `classifier_predict_${stamp}`, tune: `classifier_tune_${stamp}`,
+    evaluate: `classifier_eval_${stamp}`, predict: `classifier_predict_${stamp}`, xai: `classifier_xai_${stamp}`, tune: `classifier_tune_${stamp}`,
   };
   const headers = {
     train: ['Train classifier', 'Train the selected architecture plugin from class folders.'],
     finetune: ['Finetune classifier', 'Transfer a checkpoint to the current classes and optionally freeze feature stages.'],
     evaluate: ['Evaluate classifier', 'Compute full metrics, tune per-class thresholds, and build the evaluation report.'],
     predict: ['Classify images', 'Write top-k predictions and apply optional per-class confidence thresholds.'],
+    xai: ['Explain classifier', 'Generate signed Grad-CAM overlays and ConvNeXt stage activations like the fish xAI flow.'],
     tune: ['Tune classifier', 'Search learning rate, regularization, dropout, and label smoothing.'],
   };
   let body = '';
@@ -384,6 +385,15 @@ function classificationForm(mode) {
       ${field('topk', 'Top-k predictions', { value: '3', type: 'number', min: 1 })}
       ${field('conf', 'Fallback confidence', { value: '0', type: 'number', min: 0, step: 0.01 })}
     </div></div>`;
+  if (mode === 'xai') body = `<div class="card"><h3>ConvNeXt xAI inputs</h3>
+    ${field('checkpoint', 'Classifier checkpoint', { placeholder: '/runs/classifier/weights/best.pt', required: true })}
+    ${field('source', 'Image or directory', { placeholder: '/data/images', required: true })}
+    <div class="adv-grid">
+      ${field('target', 'Target class', { value: 'predicted', placeholder: 'predicted, class name, or index' })}
+      ${field('maxImages', 'Maximum images', { value: '24', type: 'number', min: 1 })}
+      ${field('activationChannels', 'Channels per stage', { value: '4', type: 'number', min: 1 })}
+      ${field('intensity', 'Overlay intensity', { value: '0.72', type: 'number', min: 0.05, step: 0.05 })}
+    </div><p class="muted">Red supports the selected class; blue opposes it. Trainer also exports the highest-energy feature channels at each ConvNeXt stage and an auditable JSON manifest.</p></div>`;
   if (mode === 'tune') body = `<div class="card"><h3>Tuning inputs</h3>
     ${field('data', 'Dataset root', { placeholder: '/data/species', required: true })}
     ${architectureField('arch', 'Architecture plugin', { value: 'convnext-tiny' })}
@@ -564,8 +574,10 @@ function bindJobRows() {
 async function renderNew(main) {
   const { agents } = await api('/agents');
   const family = currentFamily();
-  const modes = family === 'detection' || family === 'classification'
+  const modes = family === 'detection'
     ? [['train', 'Train'], ['finetune', 'Finetune'], ['evaluate', 'Evaluate'], ['predict', 'Predict'], ['tune', 'Tune']]
+    : family === 'classification'
+      ? [['train', 'Train'], ['finetune', 'Finetune'], ['evaluate', 'Evaluate'], ['predict', 'Predict'], ['xai', 'xAI'], ['tune', 'Tune']]
     : family === 'vlm' ? [['tune', 'LoRA Tune']] : [['train', 'Train'], ['evaluate', 'Evaluate'], ['predict', 'Predict']];
   main.innerHTML = `<h2 class="page-title">New ${familyLabel()} Run</h2><p class="page-sub">Choose the operation, target machine and device, then preview or queue it.</p>
     <div id="new-target">${machinePickerHtml(agents)}</div>
@@ -752,6 +764,122 @@ function bindEvidenceImageRetry() {
   }));
 }
 
+const classificationXaiImageCache = new Map();
+
+function evidenceFileUrl(relativePath) {
+  return `/api/evidence/file?path=${encodeURIComponent(relativePath)}`;
+}
+
+function loadEvidenceCanvasImage(url, retry = 0) {
+  const key = `${url}:${retry}`;
+  if (!classificationXaiImageCache.has(key)) classificationXaiImageCache.set(key, new Promise((resolve, reject) => {
+    const source = new Image();
+    source.decoding = 'async';
+    source.onload = () => resolve(source);
+    source.onerror = () => {
+      if (retry < 1) loadEvidenceCanvasImage(`${url}${url.includes('?') ? '&' : '?'}retry=${Date.now()}`, retry + 1).then(resolve, reject);
+      else reject(new Error(`Unable to load ${url}`));
+    };
+    source.src = url;
+  }));
+  return classificationXaiImageCache.get(key);
+}
+
+async function drawClassificationGradcam(canvas, originalUrl, mapUrl, intensity) {
+  const [original, map] = await Promise.all([
+    loadEvidenceCanvasImage(originalUrl), loadEvidenceCanvasImage(mapUrl),
+  ]);
+  const scale = Math.min(1, 720 / Math.max(original.naturalWidth, original.naturalHeight));
+  const width = Math.max(1, Math.round(original.naturalWidth * scale));
+  const height = Math.max(1, Math.round(original.naturalHeight * scale));
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  context.drawImage(original, 0, 0, width, height);
+  const colorMap = document.createElement('canvas');
+  colorMap.width = map.naturalWidth;
+  colorMap.height = map.naturalHeight;
+  const mapContext = colorMap.getContext('2d', { willReadFrequently: true });
+  mapContext.drawImage(map, 0, 0);
+  const pixels = mapContext.getImageData(0, 0, colorMap.width, colorMap.height);
+  for (let offset = 0; offset < pixels.data.length; offset += 4) {
+    const signed = (pixels.data[offset] / 127.5) - 1;
+    const strength = Math.abs(signed) < 0.025 ? 0 : Math.pow(Math.abs(signed), 0.72);
+    const color = signed >= 0 ? [238, 82, 74] : [54, 126, 194];
+    pixels.data[offset] = color[0];
+    pixels.data[offset + 1] = color[1];
+    pixels.data[offset + 2] = color[2];
+    pixels.data[offset + 3] = Math.round(255 * 0.68 * strength * intensity);
+  }
+  mapContext.putImageData(pixels, 0, 0);
+  context.imageSmoothingEnabled = true;
+  context.drawImage(colorMap, 0, 0, width, height);
+}
+
+function renderClassificationXaiViewer(container, manifestItem, manifest) {
+  const images = manifest.images || [];
+  if (!images.length || !manifestItem.url) {
+    container.innerHTML = '<div class="empty">No locally previewable ConvNeXt xAI manifest is available yet.</div>';
+    return;
+  }
+  const runRoot = manifestItem.relativePath.replace(/\/xai\/manifest\.json$/, '');
+  container.innerHTML = `<section class="card classification-xai-live">
+    <div class="model-registry-head"><div><span class="control-kicker">Live signed activation</span><h3>ConvNeXt xAI viewer</h3>
+      <p class="muted">Red supports the selected class; blue opposes it. This uses the retained signed map, not a synthetic browser heatmap.</p></div>
+      <a class="btn small" id="classification-xai-gallery" target="_blank" rel="noopener">Open gallery ↗</a></div>
+    <div class="classification-xai-controls">
+      <label class="field"><span>Image</span><select id="classification-xai-image">${images.map((item, index) => `<option value="${index}">${esc(item.token)} · ${esc(item.predicted)} · ${(Number(item.confidence) * 100).toFixed(1)}%</option>`).join('')}</select></label>
+      <label class="field"><span>Activation intensity <strong id="classification-xai-intensity-value">72%</strong></span><input id="classification-xai-intensity" type="range" min="0" max="100" value="72" /></label>
+    </div>
+    <div class="classification-xai-stage">
+      <figure class="classification-xai-map"><canvas id="classification-xai-canvas"></canvas><figcaption id="classification-xai-caption"></figcaption></figure>
+      <figure><img id="classification-xai-activations" alt="ConvNeXt feature activations" /><figcaption>Highest-energy feature channels at every captured ConvNeXt stage</figcaption></figure>
+    </div><div id="classification-xai-scores" class="classification-xai-scores"></div>
+  </section>`;
+  const select = $('#classification-xai-image', container);
+  const slider = $('#classification-xai-intensity', container);
+  const canvas = $('#classification-xai-canvas', container);
+  const activationImage = $('#classification-xai-activations', container);
+  const artifact = (relative) => evidenceFileUrl(`${runRoot}/${relative}`);
+  let renderToken = 0;
+  const draw = async () => {
+    const item = images[Number(select.value) || 0];
+    const token = ++renderToken;
+    $('#classification-xai-intensity-value', container).textContent = `${slider.value}%`;
+    $('#classification-xai-caption', container).textContent = `${item.target} · target ${(Number(item.target_score) * 100).toFixed(1)}% · ${item.layer}`;
+    $('#classification-xai-scores', container).innerHTML = (item.topk || []).map((score) => `<span><strong>${esc(score.class)}</strong> ${(Number(score.confidence) * 100).toFixed(1)}%</span>`).join('');
+    activationImage.src = artifact(item.activations);
+    $('#classification-xai-gallery', container).href = evidenceFileUrl(`${runRoot}/reports/xai.html`);
+    canvas.closest('figure').classList.add('loading');
+    try {
+      await drawClassificationGradcam(canvas, artifact(item.input), artifact(item.signed_map), Number(slider.value) / 100);
+      if (token === renderToken) canvas.closest('figure').classList.remove('loading', 'failed');
+    } catch {
+      if (token === renderToken) canvas.closest('figure').classList.add('failed');
+    }
+  };
+  select.addEventListener('change', draw);
+  slider.addEventListener('input', draw);
+  draw();
+}
+
+async function loadClassificationXaiViewer(container) {
+  if (!container) return;
+  container.innerHTML = '<div class="empty">Loading ConvNeXt xAI manifest…</div>';
+  try {
+    const catalog = await api('/evidence?family=classification&kind=document&q=xai%2Fmanifest.json&limit=20');
+    const manifestItem = (catalog.items || []).find((item) => item.url && item.relativePath.endsWith('/xai/manifest.json'));
+    if (!manifestItem) {
+      container.innerHTML = '<div class="empty">No ConvNeXt xAI run yet. Open New Run → xAI to generate signed maps and activations.</div>';
+      return;
+    }
+    const manifest = await api(manifestItem.url.replace(/^\/api/, ''));
+    renderClassificationXaiViewer(container, manifestItem, manifest);
+  } catch (error) {
+    container.innerHTML = `<div class="warn-banner">${esc(error.message || 'Unable to load ConvNeXt xAI manifest')}</div>`;
+  }
+}
+
 async function renderEvidence(main) {
   const family = currentFamily();
   main.innerHTML = `<div class="model-registry-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">xAI and evidence</h2>
@@ -759,6 +887,7 @@ async function renderEvidence(main) {
       <div class="row"><a class="btn" href="#/models">Model registry</a><button class="btn primary" id="evidence-refresh">Refresh</button></div></div>
     <section class="evidence-tools card"><label class="field"><span>Find evidence</span><input id="evidence-query" placeholder="run, checkpoint, class, mask…" /></label>
       <label class="field"><span>Artifact type</span><select id="evidence-kind"><option value="all">All evidence</option><option value="xai">xAI / saliency</option><option value="mask-diagnostic">Mask/background diagnostics</option><option value="augmentation">Augmentation previews</option><option value="visual">Prediction visuals</option><option value="report">Reports</option><option value="metrics">Metrics</option><option value="predictions">Predictions</option><option value="model">Models</option><option value="document">Other documents</option></select></label></section>
+    ${family === 'classification' ? '<div id="classification-xai-viewer"></div>' : ''}
     <div id="evidence-status" class="evidence-status"><span class="muted">Loading run evidence…</span></div>
     <section id="evidence-grid" class="evidence-grid"></section>`;
 
@@ -788,6 +917,7 @@ async function renderEvidence(main) {
   $('#evidence-refresh').addEventListener('click', load);
   $('#evidence-kind').addEventListener('change', load);
   $('#evidence-query').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+  if (family === 'classification') await loadClassificationXaiViewer($('#classification-xai-viewer'));
   await load();
 }
 

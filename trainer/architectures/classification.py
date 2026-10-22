@@ -76,7 +76,7 @@ class TinyImageCNN(nn.Module):
                        description="Compact ConvNeXt with depthwise 7x7 blocks and hierarchical downsampling.",
                        family="ConvNeXt",
                        input_contract="RGB image tensor B×3×H×W from class folders.",
-                       output_contract="Per-class logits, probabilities, top-k predictions and calibrated thresholds.",
+                       output_contract="Per-class logits, probabilities, top-k predictions, calibrated thresholds, signed Grad-CAM and stage activations.",
                        training_strategy="Supervised image classification with shared augmentation, EMA and early stopping.",
                        stages=("image", "stem", "hierarchical features", "global pooling", "class logits"))
 def build_convnext(num_classes: int, width: int = 32, dropout: float = 0.1, **_: object) -> nn.Module:

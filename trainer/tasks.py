@@ -68,7 +68,7 @@ def run_detection(action: str, params: dict[str, Any]) -> int:
 
 
 @register_task("classification", actions=("train", "finetune", "evaluate", "val", "predict", "export", "tune",
-                                                  "tune-thresh", "report", "viz-augment", "bench-data"),
+                                                  "tune-thresh", "report", "viz-augment", "bench-data", "xai"),
                default_architecture="convnext-tiny",
                description="Full-lifecycle folder-based image classification.")
 def run_classification(action: str, params: dict[str, Any]) -> int:
@@ -78,9 +78,9 @@ def run_classification(action: str, params: dict[str, Any]) -> int:
     argv = [action]
     if action in {"train", "finetune", "evaluate", "tune", "tune-thresh", "report", "viz-augment", "bench-data"}:
         _option(argv, "data", params.get("data"))
-    if action == "predict":
+    if action in {"predict", "xai"}:
         _option(argv, "source", params.get("source"))
-    if action in {"finetune", "evaluate", "predict", "export", "tune-thresh", "report"}:
+    if action in {"finetune", "evaluate", "predict", "xai", "export", "tune-thresh", "report"}:
         _option(argv, "checkpoint", params.get("checkpoint") or params.get("model"))
     suffix = {
         "evaluate": "metrics.json", "predict": "predictions.csv", "export": "model.onnx",
@@ -110,6 +110,8 @@ def run_classification(action: str, params: dict[str, Any]) -> int:
             _option(argv, "thresholds", params.get("thresholds"))
     elif action == "predict":
         _options(argv, params, ("batch", "workers", "device", "conf", "thresholds", "topk"))
+    elif action == "xai":
+        _options(argv, params, ("device", "target", "max_images", "intensity", "activation_channels"))
     elif action == "export":
         _options(argv, params, ("device", "opset"))
     elif action == "viz-augment":
