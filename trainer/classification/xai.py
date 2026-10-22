@@ -8,7 +8,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import cv2
 import numpy as np
@@ -25,6 +25,11 @@ def _feature_layers(model: nn.Module) -> list[tuple[str, nn.Module]]:
         if stages:
             return [(f"stage_{index + 1}", stage) for index, stage in enumerate(stages)]
     if hasattr(model, "features"):
+        children = list(model.features.children())
+        convnext_stages = [child for child in children
+                           if any(type(module).__name__ == "CNBlock" for module in child.modules())]
+        if convnext_stages:
+            return [(f"stage_{index + 1}", stage) for index, stage in enumerate(convnext_stages)]
         return [("features", model.features)]
     convolutions = [(name, module) for name, module in model.named_modules()
                     if isinstance(module, nn.Conv2d)]
@@ -132,7 +137,8 @@ def _write_gallery(output: Path, rows: list[dict[str, Any]], architecture: str) 
 
 def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterable[Path], output: Path,
                  device: torch.device, *, target: str = "predicted", max_images: int = 24,
-                 intensity: float = 0.72, activation_channels: int = 4) -> dict[str, Any]:
+                 intensity: float = 0.72, activation_channels: int = 4,
+                 preprocess: Callable[[Path], tuple[torch.Tensor, np.ndarray]] | None = None) -> dict[str, Any]:
     """Generate signed class evidence and stage activations for classifier images."""
     names = list(payload["classes"])
     paths = list(image_paths)[:max_images]
@@ -157,11 +163,15 @@ def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterabl
     model.eval()
     try:
         for index, image_path in enumerate(paths, start=1):
-            dataset = ImageDataset([Sample(Path(image_path), 0)], int(payload["imgsz"]), augment=False,
-                                   num_classes=len(names))
-            tensor, _, _ = dataset[0]
-            rgb = np.clip((tensor.numpy().transpose(1, 2, 0) * 0.25 + 0.5) * 255, 0, 255).astype(np.uint8)
-            model_input = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            if preprocess is None:
+                dataset = ImageDataset([Sample(Path(image_path), 0)], int(payload["imgsz"]), augment=False,
+                                       num_classes=len(names))
+                tensor, _, _ = dataset[0]
+                rgb = np.clip((tensor.numpy().transpose(1, 2, 0) * 0.25 + 0.5) * 255, 0, 255).astype(np.uint8)
+                model_input = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            else:
+                tensor, model_input = preprocess(Path(image_path))
+                model_input = np.ascontiguousarray(model_input)
             captured.clear()
             model.zero_grad(set_to_none=True)
             with torch.enable_grad():
@@ -181,10 +191,12 @@ def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterabl
             predicted_index = int(probabilities_cpu.argmax())
             token = _token(index, Path(image_path))
 
-            display_side = max(320, int(payload["imgsz"]))
+            image_size = int(payload.get("imgsz", tensor.shape[-1]))
+            display_side = max(320, image_size)
             display_input = _fit(model_input, display_side, display_side)
             display_overlay = _fit(overlay, display_side, display_side)
-            input_panel = _label(display_input, "MODEL INPUT", f"{payload['imgsz']}px letterbox + checkpoint normalisation")
+            preprocessing = str(payload.get("preprocessing", f"{image_size}px letterbox + checkpoint normalisation"))
+            input_panel = _label(display_input, "MODEL INPUT", preprocessing)
             overlay_panel = _label(
                 display_overlay, f"SIGNED GRAD-CAM | {names[target_index]}",
                 f"red supports | blue opposes | target p={float(probabilities_cpu[target_index]):.3f}",
