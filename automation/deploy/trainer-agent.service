@@ -1,0 +1,19 @@
+[Unit]
+Description=Trainer outbound training agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trainer
+Group=trainer
+WorkingDirectory=/opt/trainer
+EnvironmentFile=/etc/trainer-automation/agent.env
+ExecStart=/usr/bin/node /opt/trainer/automation/vm/agent.js
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

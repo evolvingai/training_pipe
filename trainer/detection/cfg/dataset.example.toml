@@ -1,0 +1,35 @@
+# Example dataset descriptor. Copy next to your data and adapt.
+
+# Optional root; train/val/test resolve relative to it (default: this file's dir).
+path = "/data/my-dataset"
+
+# ── YOLO-format splits ────────────────────────────────────────────────────────
+# Each split may be:
+#   - a directory of images (searched recursively)
+#   - a .txt file with one image path per line
+#   - a list of the above
+#   - a list of weighted sources: [{ path = "...", weight = 2.0 }, ...]
+train = "images/train"
+val = "images/val"
+# test = "images/test"
+
+[names]
+0 = "person"
+1 = "cart"
+2 = "basket"
+
+# ── COCO-format splits (alternative) ─────────────────────────────────────────
+# Use an inline table with format = "coco" for each split.
+# images      – directory where the images live (file_name in JSON is relative to it)
+# annotations – path to the COCO instances JSON file
+# names       – optional; if omitted, derived from the JSON categories array
+#
+# [train]
+# format      = "coco"
+# images      = "images/train2017"
+# annotations = "annotations/instances_train2017.json"
+#
+# [val]
+# format      = "coco"
+# images      = "images/val2017"
+# annotations = "annotations/instances_val2017.json"

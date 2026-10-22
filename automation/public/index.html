@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trainer Automation</title>
+  <link rel="stylesheet" href="./styles.css?v=20261022a" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◉</text></svg>" />
+</head>
+<body>
+  <div id="login" class="login-overlay hidden">
+    <form id="login-form" class="login-card">
+      <div class="login-logo">◉</div>
+      <h1>Trainer Automation</h1>
+      <p class="muted">Detection · Classification · Actions · VLM</p>
+      <input type="text" id="login-username" placeholder="Username" autocomplete="username" autofocus />
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
+      <button type="submit" class="btn primary">Sign in</button>
+      <div id="login-error" class="error-text"></div>
+    </form>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand">◉ <span>Trainer<br/>Automation</span></div>
+      <div class="family-switch" id="family-switch">
+        <button type="button" data-family="detection" class="active">Detection</button>
+        <button type="button" data-family="classification">Image Class</button>
+        <button type="button" data-family="video">Video Class</button>
+        <button type="button" data-family="vlm">VLM Tune</button>
+      </div>
+      <nav>
+        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
+        <a href="#/new" data-nav="new">New Run</a>
+        <a href="#/export" data-nav="export">Export</a>
+        <a href="#/models" data-nav="models">Models</a>
+        <a href="#/evidence" data-nav="evidence">xAI</a>
+        <a href="#/data" data-nav="data">Data</a>
+        <a href="#/history" data-nav="history">History</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="vm-pill" class="vm-pill">
+          <span class="dot unknown"></span><span id="vm-pill-text">VM: …</span>
+        </div>
+        <div id="signed-in" class="muted signed-in"></div>
+        <button id="logout" class="btn ghost small">Sign out</button>
+      </div>
+    </aside>
+    <main id="main"></main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="./app.js?v=20261022a"></script>
+</body>
+</html>

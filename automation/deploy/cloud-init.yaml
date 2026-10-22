@@ -1,0 +1,19 @@
+#cloud-config
+# Edit the repository and secret placeholders before passing this file to a VM.
+package_update: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+runcmd:
+  - git clone --branch main REPLACE_REPOSITORY_URL /tmp/trainer-bootstrap
+  - chmod +x /tmp/trainer-bootstrap/automation/deploy/bootstrap.sh
+  - >-
+    TRAINER_REPO_URL=REPLACE_REPOSITORY_URL
+    TRAINER_REPO_REF=main
+    CONTROL_PLANE_URL=REPLACE_CONTROL_PLANE_URL
+    AGENT_TOKEN=REPLACE_AGENT_TOKEN
+    AGENT_ID=REPLACE_AGENT_ID
+    VM_DEVICE=cpu
+    INSTALL_VLM=true
+    /tmp/trainer-bootstrap/automation/deploy/bootstrap.sh

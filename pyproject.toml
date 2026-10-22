@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trainer-platform"
+version = "0.1.0"
+description = "Unified detection, image/video classification, and VLM tuning framework"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "torch>=2.1",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+track = ["mlflow>=2.9"]
+deploy = ["onnx>=1.16", "tensorrt>=8.6", "onnxruntime>=1.16", "pycuda"]
+vlm = ["transformers>=4.55,<6", "peft>=0.13", "accelerate>=1.0", "pillow>=10", "safetensors>=0.4"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8"]
+
+[project.scripts]
+trainer = "trainer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trainer*"]
+
+[tool.setuptools.package-data]
+"trainer.detection.cfg" = ["*.toml", "models/*.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.coverage.run]
+source = ["trainer"]
+omit = ["trainer/detection/trackers/mlflow_tracker.py"]
