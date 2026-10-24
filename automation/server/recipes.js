@@ -106,14 +106,14 @@ export const recipeCatalog = [
   { type: 'detect_finetune', label: 'Detector · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'freeze', 'device', 'project'] },
   { type: 'detect_evaluate', label: 'Detector · evaluate/report', fields: ['data', 'checkpoint', 'device', 'project'] },
   { type: 'detect_predict', label: 'Detector · predict', fields: ['source', 'checkpoint', 'conf', 'device', 'project'] },
-  { type: 'detect_export', label: 'Detector · export', fields: ['checkpoint', 'format', 'imgsz', 'device'] },
+  { type: 'detect_export', label: 'Detector · export ONNX / TensorRT', fields: ['checkpoint', 'format', 'imgsz', 'device'] },
   { type: 'detect_tune', label: 'Detector · tune', fields: ['data', 'model', 'iterations', 'device', 'project'] },
   { type: 'classifier_train', label: 'Classifier · train', fields: ['data', 'arch', 'epochs', 'batch', 'imgsz', 'device', 'project'] },
   { type: 'classifier_finetune', label: 'Classifier · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'freeze', 'device', 'project'] },
   { type: 'classifier_evaluate', label: 'Classifier · evaluate/report', fields: ['data', 'checkpoint', 'batch', 'device', 'project'] },
   { type: 'classifier_predict', label: 'Classifier · predict', fields: ['source', 'checkpoint', 'batch', 'device', 'project'] },
   { type: 'classifier_xai', label: 'Classifier · signed Grad-CAM + activations', fields: ['source', 'checkpoint', 'target', 'maxImages', 'device', 'project'] },
-  { type: 'classifier_export', label: 'Classifier · export ONNX', fields: ['checkpoint', 'device', 'project'] },
+  { type: 'classifier_export', label: 'Classifier · export ONNX / TensorRT', fields: ['checkpoint', 'format', 'device', 'project'] },
   { type: 'classifier_tune', label: 'Classifier · tune', fields: ['data', 'arch', 'iterations', 'tuneEpochs', 'device', 'project'] },
   { type: 'classifier_tune-thresh', label: 'Classifier · tune thresholds', fields: ['data', 'checkpoint', 'device', 'project'] },
   { type: 'classifier_report', label: 'Classifier · report', fields: ['data', 'checkpoint', 'thresholds', 'device', 'project'] },
@@ -122,9 +122,10 @@ export const recipeCatalog = [
   { type: 'video_train', label: 'Video/action · train', fields: ['data', 'arch', 'epochs', 'batch', 'imgsz', 'clipLen', 'device', 'project'] },
   { type: 'video_evaluate', label: 'Video/action · evaluate', fields: ['data', 'checkpoint', 'batch', 'device', 'project'] },
   { type: 'video_predict', label: 'Video/action · predict', fields: ['source', 'checkpoint', 'batch', 'device', 'project'] },
-  { type: 'video_export', label: 'Video/action · export ONNX', fields: ['checkpoint', 'device', 'project'] },
+  { type: 'video_export', label: 'Video/action · export ONNX / TensorRT', fields: ['checkpoint', 'format', 'device', 'project'] },
   { type: 'vlm_tune', label: 'VLM · LoRA tune', fields: ['data', 'arch', 'model', 'epochs', 'batch', 'lr', 'loraR', 'device', 'project'] },
   { type: 'vlm_merge', label: 'VLM · merge adapter', fields: ['model', 'adapter', 'device', 'project'] },
+  { type: 'vlm_export', label: 'VLM · export ONNX / TensorRT', fields: ['model', 'adapter', 'format', 'device', 'project'] },
 ];
 
 export function buildRecipe(type, input = {}, defaults) {
@@ -180,11 +181,16 @@ export function buildRecipe(type, input = {}, defaults) {
   } else if (type === 'detect_export') {
     const format = text(p.format || 'onnx', 'format').toLowerCase();
     if (!['onnx', 'tensorrt'].includes(format)) throw new Error('format must be onnx or tensorrt');
+    if (format === 'tensorrt' && !selectedDevice.startsWith('cuda')) {
+      throw new Error('TensorRT export requires a CUDA device and GPU target');
+    }
     const output = path.join(runDir(project, jobName, cwd), 'model');
     commands = [detector(python, cwd, 'export', `Export detector to ${format}`, 'export', {
       model: text(p.checkpoint, 'checkpoint'),
       format,
       imgsz: integer(p.imgsz, 'imgsz', 640, 32, 4096),
+      opset: integer(p.opset, 'opset', 17, 11, 21),
+      workspace: integer(p.workspace, 'workspace', 4, 1, 256),
       device: selectedDevice,
       half: Boolean(p.half),
       out: output,
@@ -253,9 +259,16 @@ export function buildRecipe(type, input = {}, defaults) {
         `intensity=${number(p.intensity, 'intensity', 0.72, 0.05, 1)}`);
       commands = [command(action, 'Classifier signed Grad-CAM and feature activations', cwd, argv)];
     } else if (action === 'export') {
+      const format = text(p.format || 'onnx', 'format').toLowerCase();
+      if (!['onnx', 'tensorrt'].includes(format)) throw new Error('format must be onnx or tensorrt');
+      if (format === 'tensorrt' && !selectedDevice.startsWith('cuda')) {
+        throw new Error('TensorRT export requires a CUDA device and GPU target');
+      }
       const argv = base('export');
-      argv.push(`checkpoint=${text(p.checkpoint, 'checkpoint')}`);
-      commands = [command(action, 'Classifier export', cwd, argv)];
+      argv.push(`checkpoint=${text(p.checkpoint, 'checkpoint')}`, `format=${format}`,
+        `opset=${integer(p.opset, 'opset', 17, 11, 21)}`, `workspace=${integer(p.workspace, 'workspace', 4, 1, 256)}`);
+      if (p.half) argv.push('half=true');
+      commands = [command(action, `Classifier export ${format}`, cwd, argv)];
     } else if (action === 'tune') {
       const argv = base('tune');
       argv.push(`data=${text(p.data, 'data')}`, `arch=${text(p.arch || 'convnext-tiny', 'arch')}`,
@@ -310,7 +323,16 @@ export function buildRecipe(type, input = {}, defaults) {
       argv.push(`batch=${integer(p.batch, 'batch', 4, 1, 512)}`);
     } else if (action === 'predict') {
       argv.push(`batch=${integer(p.batch, 'batch', 4, 1, 512)}`);
-    } else if (action !== 'export') {
+    } else if (action === 'export') {
+      const format = text(p.format || 'onnx', 'format').toLowerCase();
+      if (!['onnx', 'tensorrt'].includes(format)) throw new Error('format must be onnx or tensorrt');
+      if (format === 'tensorrt' && !selectedDevice.startsWith('cuda')) {
+        throw new Error('TensorRT export requires a CUDA device and GPU target');
+      }
+      argv.push(`format=${format}`, `opset=${integer(p.opset, 'opset', 17, 11, 21)}`,
+        `workspace=${integer(p.workspace, 'workspace', 4, 1, 256)}`);
+      if (p.half) argv.push('half=true');
+    } else {
       throw new Error(`unknown video action: ${action}`);
     }
     commands = [command(action, `Video/action classifier ${action}`, cwd, argv)];
@@ -342,6 +364,28 @@ export function buildRecipe(type, input = {}, defaults) {
     ];
     if (p.trustRemoteCode) argv.push('trust_remote_code=true');
     commands = [command('merge', 'Merge VLM LoRA adapter', cwd, argv)];
+    artifacts = [output];
+  } else if (type === 'vlm_export') {
+    const output = runDir(project, jobName, cwd);
+    const format = text(p.format || 'onnx', 'format').toLowerCase();
+    if (!['onnx', 'tensorrt'].includes(format)) throw new Error('format must be onnx or tensorrt');
+    if (format === 'tensorrt' && !selectedDevice.startsWith('cuda')) {
+      throw new Error('TensorRT export requires a CUDA device and GPU target');
+    }
+    const argv = [
+      python, '-m', 'trainer', 'export', 'task=vlm', `model=${text(p.model, 'model')}`,
+      `format=${format}`, `project=${project}`, `name=${jobName}`, `device=${selectedDevice || 'auto'}`,
+      `dtype=${dtype(p.dtype)}`, `prompt=${text(p.prompt || 'Describe the image.', 'prompt')}`,
+      `image_size=${integer(p.imageSize, 'imageSize', 384, 32, 4096)}`,
+      `max_length=${integer(p.maxLength, 'maxLength', 4096, 32, 32768)}`,
+      `opset=${integer(p.opset, 'opset', 18, 18, 21)}`,
+      `workspace=${integer(p.workspace, 'workspace', 8, 1, 256)}`,
+    ];
+    if (p.adapter) argv.push(`adapter=${text(p.adapter, 'adapter')}`);
+    if (p.sampleImage) argv.push(`sample_image=${text(p.sampleImage, 'sampleImage')}`);
+    if (p.half) argv.push('half=true');
+    if (p.trustRemoteCode) argv.push('trust_remote_code=true');
+    commands = [command('export', `VLM export ${format}`, cwd, argv)];
     artifacts = [output];
   } else {
     throw new Error(`unknown job type: ${type}`);

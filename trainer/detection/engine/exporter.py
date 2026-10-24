@@ -83,10 +83,12 @@ def verify_onnx_parity(model, onnx_path: str | Path, imgsz: int = 640, atol: flo
 
 def export_tensorrt(onnx_path: str | Path, half: bool = False, int8: bool = False,
                     workspace_gb: int = 4, calib_images: list[str] | None = None,
-                    imgsz: int = 640, out_path: str | Path | None = None) -> Path:
+                    imgsz: int = 640, out_path: str | Path | None = None,
+                    profile_shapes: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None = None,
+                    max_batch: int = 8) -> Path:
     """Build a TensorRT engine from an ONNX file ([deploy] extra, needs a GPU).
 
-    Compatible with TensorRT 8.x and 10.x:
+    Compatible with TensorRT 8.x through 11.x:
     - TRT 10 removed the EXPLICIT_BATCH network flag (now always on by default).
     - TRT 10 removed builder.platform_has_fast_fp16/int8; precision flags are set
       unconditionally and TRT handles capability checking internally.
@@ -115,20 +117,63 @@ def export_tensorrt(onnx_path: str | Path, half: bool = False, int8: bool = Fals
         network = builder.create_network()
 
     parser = trt.OnnxParser(network, logger)
-    if not parser.parse(onnx_path.read_bytes()):
+    # parse_from_file resolves ONNX external-data sidecars (common for VLMs).
+    parsed = (
+        parser.parse_from_file(str(onnx_path))
+        if hasattr(parser, "parse_from_file")
+        else parser.parse(onnx_path.read_bytes())
+    )
+    if not parsed:
         errors = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"TensorRT ONNX parse failed: {errors}")
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb << 30)
+
+    # TensorRT requires an optimization profile for every dynamic input.  The
+    # classification and video exporters use a dynamic batch dimension; VLMs
+    # can additionally expose a dynamic token dimension.  Explicit profiles
+    # win, otherwise preserve every static dimension and scale batch only.
+    dynamic_inputs = []
+    for index in range(network.num_inputs):
+        tensor = network.get_input(index)
+        shape = tuple(int(value) for value in tensor.shape)
+        if any(value < 0 for value in shape):
+            dynamic_inputs.append((tensor.name, shape))
+    if dynamic_inputs:
+        profile = builder.create_optimization_profile()
+        for input_name, shape in dynamic_inputs:
+            values = profile_shapes.get(input_name) if profile_shapes else None
+            if values is None:
+                base = tuple(1 if value < 0 else value for value in shape)
+                optimum = list(base); maximum = list(base)
+                if shape and shape[0] < 0:
+                    optimum[0] = min(4, max_batch); maximum[0] = max_batch
+                values = (base, tuple(optimum), tuple(maximum))
+            accepted = profile.set_shape(input_name, *values)
+            # TensorRT 11 returns None on success; older versions returned bool.
+            if accepted is False:
+                raise RuntimeError(f"invalid TensorRT optimization profile for {input_name}: {values}")
+        config.add_optimization_profile(profile)
 
     # platform_has_fast_fp16/int8 removed in TRT 10; fall back to True (TRT handles internally).
     has_fp16 = getattr(builder, "platform_has_fast_fp16", True)
     has_int8 = getattr(builder, "platform_has_fast_int8", True)
 
     if half and has_fp16:
-        config.set_flag(trt.BuilderFlag.FP16)
+        fp16_flag = getattr(trt.BuilderFlag, "FP16", None)
+        if fp16_flag is None:
+            raise RuntimeError(
+                "TensorRT 11 removed the weakly-typed FP16 builder flag; export FP32 or provide an explicitly "
+                "FP16-typed ONNX graph"
+            )
+        config.set_flag(fp16_flag)
     if int8 and has_int8:
-        config.set_flag(trt.BuilderFlag.INT8)
+        int8_flag = getattr(trt.BuilderFlag, "INT8", None)
+        if int8_flag is None:
+            raise RuntimeError(
+                "TensorRT 11 removed the weakly-typed INT8 builder flag; provide an explicitly quantized ONNX graph"
+            )
+        config.set_flag(int8_flag)
         if calib_images:
             config.int8_calibrator = _EntropyCalibrator(calib_images, imgsz,
                                                         cache=str(onnx_path.with_suffix(".calib")))

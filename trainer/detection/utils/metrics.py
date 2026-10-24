@@ -56,7 +56,11 @@ def compute_ap(recall: np.ndarray, precision: np.ndarray) -> float:
     mpre = np.concatenate(([1.0], precision, [0.0]))
     mpre = np.flip(np.maximum.accumulate(np.flip(mpre)))
     x = np.linspace(0, 1, 101)
-    return float(np.trapz(np.interp(x, mrec, mpre), x))
+    # Integrate directly instead of calling np.trapz: NumPy 2.4 removed that
+    # deprecated alias, while Trainer still supports older NumPy releases that
+    # do not expose np.trapezoid.
+    y = np.interp(x, mrec, mpre)
+    return float(np.sum((y[:-1] + y[1:]) * np.diff(x) * 0.5))
 
 
 @dataclass

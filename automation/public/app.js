@@ -1,4 +1,4 @@
-/* Trainer Automation — same control-panel interaction model as gender_automation. */
+/* Trainer Automation control panel. */
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -9,11 +9,12 @@ let jobTimer = null;
 
 const FAMILY_KEY = 'trainer.family';
 const TARGET_KEY = 'trainer.targetAgent';
+const XAI_SAMPLE_JOB_KEY = 'trainer.classification.xaiSampleJob';
 const FAMILIES = {
   detection: { label: 'Detection', task: 'detection', prefix: 'detect_', data: 'YOLO labels + dataset TOML', export: 'Detector ONNX / TensorRT' },
-  classification: { label: 'Image Classification', task: 'classification', prefix: 'classifier_', data: 'Class-folder image datasets', export: 'Image classifier ONNX + class contract' },
-  video: { label: 'Video / Action Classification', task: 'video-classification', prefix: 'video_', data: 'Class-folder video datasets', export: 'Video classifier ONNX + clip contract' },
-  vlm: { label: 'VLM Tuning', task: 'vlm', prefix: 'vlm_', data: 'Image-text JSONL datasets', export: 'Portable LoRA adapter or merged VLM' },
+  classification: { label: 'Image Classification', task: 'classification', prefix: 'classifier_', data: 'Class-folder image datasets', export: 'Image classifier ONNX / TensorRT + class contract' },
+  video: { label: 'Video / Action Classification', task: 'video-classification', prefix: 'video_', data: 'Class-folder video datasets', export: 'Video classifier ONNX / TensorRT + clip contract' },
+  vlm: { label: 'VLM Tuning', task: 'vlm', prefix: 'vlm_', data: 'Image-text JSONL datasets', export: 'VLM ONNX / TensorRT forward graph, portable LoRA adapter, or merged model' },
 };
 
 async function api(path, options = {}) {
@@ -344,7 +345,7 @@ function classificationForm(mode) {
     finetune: ['Finetune classifier', 'Transfer a checkpoint to the current classes and optionally freeze feature stages.'],
     evaluate: ['Evaluate classifier', 'Compute full metrics, tune per-class thresholds, and build the evaluation report.'],
     predict: ['Classify images', 'Write top-k predictions and apply optional per-class confidence thresholds.'],
-    xai: ['Explain classifier', 'Generate signed Grad-CAM overlays and ConvNeXt stage activations like the fish xAI flow.'],
+    xai: ['Explain classifier', 'Generate signed Grad-CAM overlays and ConvNeXt stage activations for selected test samples.'],
     tune: ['Tune classifier', 'Search learning rate, regularization, dropout, and label smoothing.'],
   };
   let body = '';
@@ -393,7 +394,7 @@ function classificationForm(mode) {
       ${field('maxImages', 'Maximum images', { value: '24', type: 'number', min: 1 })}
       ${field('activationChannels', 'Channels per stage', { value: '4', type: 'number', min: 1 })}
       ${field('intensity', 'Overlay intensity', { value: '0.72', type: 'number', min: 0.05, step: 0.05 })}
-    </div><p class="muted">Red supports the selected class; blue opposes it. Trainer also exports the highest-energy feature channels at each ConvNeXt stage and an auditable JSON manifest.</p></div>`;
+    </div><p class="muted">Red supports the selected class; blue opposes it. The result keeps the prediction and highest-energy feature channels together for each selected sample.</p></div>`;
   if (mode === 'tune') body = `<div class="card"><h3>Tuning inputs</h3>
     ${field('data', 'Dataset root', { placeholder: '/data/species', required: true })}
     ${architectureField('arch', 'Architecture plugin', { value: 'convnext-tiny' })}
@@ -479,14 +480,23 @@ function runActions(label) {
   return `<div class="row"><button type="button" class="btn" id="preview-btn">Preview commands</button><button type="submit" class="btn primary">Queue ${esc(label.toLowerCase())}</button></div><div id="preview-out" style="margin-top:18px"></div>`;
 }
 
-function formPayload(form) {
+function exportActions({ merge = false } = {}) {
+  return `<div class="row export-actions"><button type="button" class="btn" id="preview-btn">Preview ONNX command</button>
+    <button type="submit" class="btn primary" data-export-format="onnx">Export ONNX</button>
+    <button type="submit" class="btn primary" data-export-format="tensorrt">Export TensorRT</button>
+    ${merge ? '<button type="submit" class="btn" data-job-type="vlm_merge">Merge adapter only</button>' : ''}</div>
+    <div id="preview-out" style="margin-top:18px"></div>`;
+}
+
+function formPayload(form, submitter = null) {
   const params = Object.fromEntries(new FormData(form));
+  if (submitter?.dataset.exportFormat) params.format = submitter.dataset.exportFormat;
   const dryRun = params.dryRun === 'on';
   delete params.dryRun;
   for (const key of Object.keys(params)) if (params[key] === '') delete params[key];
   const targetAgentId = selectedTarget();
   if (targetAgentId) params.targetAgentId = targetAgentId;
-  return { type: form.dataset.type, params, dryRun };
+  return { type: submitter?.dataset.jobType || form.dataset.type, params, dryRun };
 }
 
 function commandText(command) {
@@ -507,7 +517,7 @@ function bindRunForm() {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     try {
-      const { job } = await api('/jobs', { method: 'POST', body: formPayload(form) });
+      const { job } = await api('/jobs', { method: 'POST', body: formPayload(form, event.submitter) });
       toast(`Queued ${job.name}`);
       location.hash = `#/job/${job.id}`;
     } catch (error) { toast(error.message, true); }
@@ -541,7 +551,7 @@ async function renderDashboard(main) {
     </div>
     <div class="grid2">
       <div class="card"><h3>Model registry</h3><p class="muted">Installed architecture plugins, their contracts, and the exact model flow.</p><a class="btn" href="#/models">Open models</a></div>
-      <div class="card"><h3>xAI and evidence</h3><p class="muted">Reports, overlays, augmentation previews, predictions, and mask/background diagnostics.</p><a class="btn" href="#/evidence">Open xAI</a></div>
+      <div class="card"><h3>xAI</h3><p class="muted">Inspect a test sample together with its prediction, confidence, explanation, and activations.</p><a class="btn" href="#/evidence">Open xAI</a></div>
     </div>
     <div class="card"><h3>Runs</h3>${checkpoints.length ? `<table><thead><tr><th>Checkpoint</th><th>Agent</th></tr></thead><tbody>${Object.entries(inventory).flatMap(([agentId, value]) => (value.checkpoints || []).filter(checkpointMatches).slice(-8).map((item) => `<tr><td><code>${esc(item)}</code></td><td>${esc(agentId)}</td></tr>`)).join('')}</tbody></table>` : '<div class="empty">No checkpoint inventory yet.</div>'}</div>
     <div class="card"><h3>Jobs</h3>${jobTable(familyJobs.slice(0, 10))}</div>`;
@@ -569,6 +579,26 @@ function jobTable(jobs) {
 
 function bindJobRows() {
   $$('.job-row').forEach((row) => row.addEventListener('click', () => { location.hash = `#/job/${row.dataset.id}`; }));
+}
+
+function discoveredRunTable(runs) {
+  if (!runs.length) return '<div class="empty">No filesystem or smoke-matrix runs discovered for this filter.</div>';
+  return `<table><thead><tr><th>Run</th><th>Family / action</th><th>Status</th><th>Machine</th><th>Updated</th><th>Artifacts</th></tr></thead><tbody>
+    ${runs.map((run) => `<tr><td><strong>${esc(run.name)}</strong><br><code>${esc(run.path)}</code></td>
+      <td>${esc(FAMILIES[run.family]?.label || run.family || 'Unknown')} · ${esc(run.action || 'run')}${run.architecture ? `<br><span class="muted">${esc(run.architecture)}</span>` : ''}</td>
+      <td>${badge(run.status || 'completed')}${run.error ? `<br><span class="error-text">${esc(run.error)}</span>` : ''}</td>
+      <td>${esc(run.agentId || 'control-plane')}${run.remote ? ' · remote' : ''}${run.device ? `<br><span class="muted">${esc(run.device)}</span>` : ''}</td>
+      <td>${fmtTime(run.updatedAt)}${run.seconds ? `<br><span class="muted">${Number(run.seconds).toFixed(1)}s</span>` : ''}</td>
+      <td>${Number(run.files || 0).toLocaleString()} files · ${fmtBytes(run.bytes || 0)}${run.hasEvidence ? `<br><button type="button" class="btn small discovered-evidence" data-family="${esc(run.family)}">Open xAI</button>` : ''}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+function bindDiscoveredRuns() {
+  $$('.discovered-evidence').forEach((button) => button.addEventListener('click', () => {
+    if (Object.hasOwn(FAMILIES, button.dataset.family)) localStorage.setItem(FAMILY_KEY, button.dataset.family);
+    applyFamilyChrome();
+    location.hash = '#/evidence';
+  }));
 }
 
 async function renderNew(main) {
@@ -602,29 +632,47 @@ async function renderExport(main) {
   const family = currentFamily();
   const detection = family === 'detection';
   if (family === 'vlm') {
-    main.innerHTML = `<h2 class="page-title">Merge VLM adapter</h2><p class="page-sub">Merge a Trainer LoRA adapter into its base model for standalone deployment.</p>
+    main.innerHTML = `<h2 class="page-title">Export VLM</h2><p class="page-sub">Export a multimodal forward graph to ONNX or TensorRT. A LoRA adapter can be merged before tracing.</p>
       ${machinePickerHtml(agents)}
-      <form id="run-form" data-type="vlm_merge">
-        ${commonRunFields(`vlm_merged_${new Date().toISOString().slice(0, 10).replaceAll('-', '_')}`)}
-        <div class="card"><h3>Merge source</h3>
+      <form id="run-form" data-type="vlm_export">
+        <input type="hidden" name="format" value="onnx" />
+        ${commonRunFields(`vlm_export_${new Date().toISOString().slice(0, 10).replaceAll('-', '_')}`)}
+        <div class="card"><h3>Export source</h3>
           ${field('model', 'Base model', { placeholder: 'organization/model-name', required: true })}
-          ${field('adapter', 'LoRA adapter directory', { placeholder: '/runs/vlm_lora/adapter', required: true })}
+          ${field('adapter', 'LoRA adapter directory (optional)', { placeholder: '/runs/vlm_lora/adapter' })}
+          ${field('sampleImage', 'Trace image (optional)', { placeholder: '/data/export/sample.jpg' })}
+          ${field('prompt', 'Trace prompt', { value: 'Describe the image.' })}
           <label class="field"><span>Compute dtype</span><select name="dtype"><option value="auto">Auto</option><option value="bfloat16">bfloat16</option><option value="float16">float16</option><option value="float32">float32</option></select></label>
+          <div class="adv-grid">
+            ${field('imageSize', 'Fallback image size', { value: '384', type: 'number', min: 32 })}
+            ${field('maxLength', 'Maximum processed tokens', { value: '4096', type: 'number', min: 32 })}
+            ${field('opset', 'ONNX opset', { value: '18', type: 'number', min: 18 })}
+            ${field('workspace', 'TensorRT workspace (GiB)', { value: '8', type: 'number', min: 1 })}
+          </div>
+          <label class="inline-check"><input type="checkbox" name="half" /> Build TensorRT engine with FP16 kernels (TensorRT 8–10)</label>
           <label class="inline-check"><input type="checkbox" name="trustRemoteCode" /> Allow model repository custom code</label>
-        </div>${advancedFields()}${runActions('merge')}
+          <p class="muted">TensorRT requires a CUDA target. VLM export traces fixed input shapes from this image and prompt, returns logits, and leaves autoregressive decoding to the serving runtime.</p>
+        </div>${advancedFields()}${exportActions({ merge: true })}
       </form>`;
     bindMachinePicker(agents); bindRunForm(); return;
   }
   const image = family === 'classification';
   const prefix = detection ? 'detect' : image ? 'classifier' : 'video';
-  main.innerHTML = `<h2 class="page-title">Export</h2><p class="page-sub">${detection ? 'Build an ONNX or TensorRT detector artifact.' : image ? 'Build image classifier ONNX and its class/tensor contract.' : 'Build video/action classifier ONNX and its clip/tensor contract.'}</p>
+  main.innerHTML = `<h2 class="page-title">Export</h2><p class="page-sub">Build ONNX or TensorRT artifacts with the preprocessing and tensor contract required for deployment.</p>
     ${machinePickerHtml(agents)}
     <form id="run-form" data-type="${prefix}_export">
+      <input type="hidden" name="format" value="onnx" />
       ${commonRunFields(`${prefix}_export_${new Date().toISOString().slice(0, 10).replaceAll('-', '_')}`)}
       <div class="card"><h3>Export source</h3>
         ${field('checkpoint', 'Checkpoint', { placeholder: detection ? '/runs/experiment/weights/best.pt' : image ? '/runs/classifier/best.pt' : '/runs/video_action/best.pt', required: true })}
-        ${detection ? `<div class="grid2"><label class="field"><span>Format</span><select name="format"><option value="onnx">ONNX</option><option value="tensorrt">TensorRT</option></select></label>${field('imgsz', 'Image size', { value: '640', type: 'number', min: 32 })}</div><label class="inline-check"><input type="checkbox" name="half" /> FP16 TensorRT</label>` : `<p class="muted">Exports dynamic batch input <code>${image ? 'images' : 'clips'}</code> and output <code>logits</code>, plus a JSON deployment contract.</p>`}
-      </div>${advancedFields()}${runActions('export')}
+        <div class="adv-grid">
+          ${detection ? field('imgsz', 'Image size', { value: '640', type: 'number', min: 32 }) : ''}
+          ${field('opset', 'ONNX opset', { value: '17', type: 'number', min: 11 })}
+          ${field('workspace', 'TensorRT workspace (GiB)', { value: '4', type: 'number', min: 1 })}
+        </div>
+        <label class="inline-check"><input type="checkbox" name="half" /> Build TensorRT engine with FP16 kernels (TensorRT 8–10)</label>
+        <p class="muted">ONNX supports dynamic batch input <code>${detection || image ? 'images' : 'clips'}</code>. TensorRT export requires a CUDA target and also preserves the ONNX intermediate.</p>
+      </div>${advancedFields()}${exportActions()}
     </form>`;
   bindMachinePicker(agents);
   bindRunForm();
@@ -752,32 +800,16 @@ async function renderModels(main) {
   drawRegistry();
 }
 
-function bindEvidenceImageRetry() {
-  $$('.evidence-preview img').forEach((image) => image.addEventListener('error', () => {
-    const retries = Number(image.dataset.retries || 0);
-    if (retries >= 1) {
-      image.closest('.evidence-preview')?.classList.add('failed');
-      return;
-    }
-    image.dataset.retries = String(retries + 1);
-    setTimeout(() => { image.src = `${image.dataset.source}${image.dataset.source.includes('?') ? '&' : '?'}retry=${Date.now()}`; }, 450);
-  }));
-}
-
 const classificationXaiImageCache = new Map();
 
-function evidenceFileUrl(relativePath) {
-  return `/api/evidence/file?path=${encodeURIComponent(relativePath)}`;
-}
-
-function loadEvidenceCanvasImage(url, retry = 0) {
+function loadXaiCanvasImage(url, retry = 0) {
   const key = `${url}:${retry}`;
   if (!classificationXaiImageCache.has(key)) classificationXaiImageCache.set(key, new Promise((resolve, reject) => {
     const source = new Image();
     source.decoding = 'async';
     source.onload = () => resolve(source);
     source.onerror = () => {
-      if (retry < 1) loadEvidenceCanvasImage(`${url}${url.includes('?') ? '&' : '?'}retry=${Date.now()}`, retry + 1).then(resolve, reject);
+      if (retry < 1) loadXaiCanvasImage(`${url}${url.includes('?') ? '&' : '?'}retry=${Date.now()}`, retry + 1).then(resolve, reject);
       else reject(new Error(`Unable to load ${url}`));
     };
     source.src = url;
@@ -787,7 +819,7 @@ function loadEvidenceCanvasImage(url, retry = 0) {
 
 async function drawClassificationGradcam(canvas, originalUrl, mapUrl, intensity) {
   const [original, map] = await Promise.all([
-    loadEvidenceCanvasImage(originalUrl), loadEvidenceCanvasImage(mapUrl),
+    loadXaiCanvasImage(originalUrl), loadXaiCanvasImage(mapUrl),
   ]);
   const scale = Math.min(1, 720 / Math.max(original.naturalWidth, original.naturalHeight));
   const width = Math.max(1, Math.round(original.naturalWidth * scale));
@@ -816,21 +848,20 @@ async function drawClassificationGradcam(canvas, originalUrl, mapUrl, intensity)
   context.drawImage(colorMap, 0, 0, width, height);
 }
 
-function renderClassificationXaiViewer(container, manifestItem, manifest) {
-  const images = manifest.images || [];
-  if (!images.length || !manifestItem.url) {
-    container.innerHTML = '<div class="empty">No locally previewable ConvNeXt xAI manifest is available yet.</div>';
+function renderClassificationXaiViewer(container, run) {
+  const images = run.samples || [];
+  if (!images.length) {
+    container.innerHTML = '<div class="empty">No sample-level ConvNeXt xAI result is available yet.</div>';
     return;
   }
-  const runRoot = manifestItem.relativePath.replace(/\/xai\/manifest\.json$/, '');
   container.innerHTML = `<section class="card classification-xai-live">
-    <div class="model-registry-head"><div><span class="control-kicker">Live signed activation</span><h3>ConvNeXt xAI viewer</h3>
-      <p class="muted">Red supports the selected class; blue opposes it. This uses the retained signed map, not a synthetic browser heatmap.</p></div>
-      <a class="btn small" id="classification-xai-gallery" target="_blank" rel="noopener">Open gallery ↗</a></div>
+    <div class="model-registry-head"><div><span class="control-kicker">Test sample result</span><h3>Prediction + ConvNeXt xAI</h3>
+      <p class="muted">${esc(run.architecture || 'classification model')} · red supports the selected class; blue opposes it.</p></div></div>
     <div class="classification-xai-controls">
-      <label class="field"><span>Image</span><select id="classification-xai-image">${images.map((item, index) => `<option value="${index}">${esc(item.token)} · ${esc(item.predicted)} · ${(Number(item.confidence) * 100).toFixed(1)}%</option>`).join('')}</select></label>
+      <label class="field"><span>Test sample</span><select id="classification-xai-image">${images.map((item, index) => `<option value="${index}">${esc(item.label)} · ${esc(item.predicted)} · ${(Number(item.confidence) * 100).toFixed(1)}%</option>`).join('')}</select></label>
       <label class="field"><span>Activation intensity <strong id="classification-xai-intensity-value">72%</strong></span><input id="classification-xai-intensity" type="range" min="0" max="100" value="72" /></label>
     </div>
+    <div id="classification-xai-prediction" class="classification-xai-prediction"></div>
     <div class="classification-xai-stage">
       <figure class="classification-xai-map"><canvas id="classification-xai-canvas"></canvas><figcaption id="classification-xai-caption"></figcaption></figure>
       <figure><img id="classification-xai-activations" alt="ConvNeXt feature activations" /><figcaption>Highest-energy feature channels at every captured ConvNeXt stage</figcaption></figure>
@@ -840,19 +871,18 @@ function renderClassificationXaiViewer(container, manifestItem, manifest) {
   const slider = $('#classification-xai-intensity', container);
   const canvas = $('#classification-xai-canvas', container);
   const activationImage = $('#classification-xai-activations', container);
-  const artifact = (relative) => evidenceFileUrl(`${runRoot}/${relative}`);
   let renderToken = 0;
   const draw = async () => {
     const item = images[Number(select.value) || 0];
     const token = ++renderToken;
     $('#classification-xai-intensity-value', container).textContent = `${slider.value}%`;
-    $('#classification-xai-caption', container).textContent = `${item.target} · target ${(Number(item.target_score) * 100).toFixed(1)}% · ${item.layer}`;
-    $('#classification-xai-scores', container).innerHTML = (item.topk || []).map((score) => `<span><strong>${esc(score.class)}</strong> ${(Number(score.confidence) * 100).toFixed(1)}%</span>`).join('');
-    activationImage.src = artifact(item.activations);
-    $('#classification-xai-gallery', container).href = evidenceFileUrl(`${runRoot}/reports/xai.html`);
+    $('#classification-xai-prediction', container).innerHTML = `<span>Prediction</span><strong>${esc(item.predicted)}</strong><b>${(Number(item.confidence) * 100).toFixed(1)}%</b>`;
+    $('#classification-xai-caption', container).textContent = `Test image + signed Grad-CAM · target ${item.target} ${(Number(item.targetScore) * 100).toFixed(1)}% · ${item.layer}`;
+    $('#classification-xai-scores', container).innerHTML = (item.topK || []).map((score) => `<span><strong>${esc(score.class)}</strong> ${(Number(score.confidence) * 100).toFixed(1)}%</span>`).join('');
+    activationImage.src = item.activationsUrl;
     canvas.closest('figure').classList.add('loading');
     try {
-      await drawClassificationGradcam(canvas, artifact(item.input), artifact(item.signed_map), Number(slider.value) / 100);
+      await drawClassificationGradcam(canvas, item.inputUrl, item.signedMapUrl, Number(slider.value) / 100);
       if (token === renderToken) canvas.closest('figure').classList.remove('loading', 'failed');
     } catch {
       if (token === renderToken) canvas.closest('figure').classList.add('failed');
@@ -863,78 +893,231 @@ function renderClassificationXaiViewer(container, manifestItem, manifest) {
   draw();
 }
 
-async function loadClassificationXaiViewer(container) {
+async function loadClassificationXaiViewer(container, runName = '') {
   if (!container) return;
-  container.innerHTML = '<div class="empty">Loading ConvNeXt xAI manifest…</div>';
+  container.innerHTML = '<div class="empty">Loading ConvNeXt xAI results…</div>';
   try {
-    const catalog = await api('/evidence?family=classification&kind=document&q=xai%2Fmanifest.json&limit=20');
-    const manifestItem = (catalog.items || []).find((item) => item.url && item.relativePath.endsWith('/xai/manifest.json'));
-    if (!manifestItem) {
-      container.innerHTML = '<div class="empty">No ConvNeXt xAI run yet. Open New Run → xAI to generate signed maps and activations.</div>';
+    const payload = await api(`/xai/classification?limit=100${runName ? `&run=${encodeURIComponent(runName)}` : ''}`);
+    const runs = payload.runs || [];
+    if (!runs.length) {
+      container.innerHTML = '<div class="empty">No test-sample xAI result yet. Upload one image above to generate its prediction, signed map, and activations.</div>';
       return;
     }
-    const manifest = await api(manifestItem.url.replace(/^\/api/, ''));
-    renderClassificationXaiViewer(container, manifestItem, manifest);
+    if (runName || runs.length === 1) {
+      renderClassificationXaiViewer(container, runs[0]);
+      return;
+    }
+    container.innerHTML = `<section class="card classification-xai-catalog">
+      <div><span class="control-kicker">xAI results</span><h3>Completed xAI run</h3>
+        <p class="muted">Choose a run, then inspect each sample’s input, prediction, signed Grad-CAM, and ConvNeXt feature activations together.</p></div>
+      <label class="field"><span>Run</span><select id="classification-xai-run-select">${runs.map((run, index) => `<option value="${index}">${esc(run.name)}</option>`).join('')}</select></label></section><div id="classification-xai-active"></div>`;
+    const select = $('#classification-xai-run-select', container);
+    const active = $('#classification-xai-active', container);
+    let drawToken = 0;
+    const draw = async () => {
+      const token = ++drawToken;
+      const run = runs[Number(select.value) || 0];
+      if (token === drawToken) renderClassificationXaiViewer(active, run);
+    };
+    select.addEventListener('change', () => draw().catch((error) => {
+      active.innerHTML = `<div class="warn-banner">${esc(error.message || 'Unable to load selected xAI run')}</div>`;
+    }));
+    await draw();
   } catch (error) {
     container.innerHTML = `<div class="warn-banner">${esc(error.message || 'Unable to load ConvNeXt xAI manifest')}</div>`;
   }
 }
 
+function fileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Unable to read test sample'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function classificationCheckpointRows(inventory) {
+  return Object.entries(inventory || {}).flatMap(([agentId, value]) => (value.checkpoints || [])
+    .filter((checkpoint) => !String(checkpoint).toLowerCase().includes('/video') && !String(checkpoint).toLowerCase().endsWith('/adapter'))
+    .map((checkpoint) => ({ agentId, checkpoint })));
+}
+
+async function watchClassificationXaiSample(status, viewer, jobId) {
+  if (!status?.isConnected || currentFamily() !== 'classification') return;
+  try {
+    const { job } = await api(`/jobs/${jobId}`);
+    status.innerHTML = `<div><strong>${esc(job.name)}</strong> ${badge(job.status)}</div><span class="muted">${esc(job.steps.find((step) => step.status === 'running')?.title || (job.status === 'queued' ? 'Waiting for the selected machine' : 'One-image prediction and xAI'))} · <a href="#/job/${job.id}">open job</a></span>`;
+    if (job.status === 'completed') {
+      await loadClassificationXaiViewer(viewer, job.name);
+      return;
+    }
+    if (['failed', 'cancelled'].includes(job.status)) return;
+    jobTimer = setTimeout(() => watchClassificationXaiSample(status, viewer, jobId), 1800);
+  } catch (error) {
+    status.innerHTML = `<div class="warn-banner">${esc(error.message || 'Unable to read sample job')}</div>`;
+  }
+}
+
+function renderClassificationXaiTest(container, viewer, agents, inventory) {
+  const machines = machineList(agents);
+  const savedTarget = localStorage.getItem(TARGET_KEY);
+  const selected = machines.find((machine) => machine.agentId === savedTarget) || machines.find((machine) => machine.online) || machines[0];
+  const checkpoints = classificationCheckpointRows(inventory);
+  container.innerHTML = `<section class="card classification-xai-test">
+    <div class="model-registry-head"><div><span class="control-kicker">Selected-sample xAI</span><h3>Test one image</h3>
+      <p class="muted">Choose a reserved or uploaded test image and a trained checkpoint, then inspect the prediction and explanation together.</p></div></div>
+    <form id="classification-xai-test-form">
+      <div class="classification-xai-test-grid">
+        <label class="xai-sample-picker" for="classification-xai-file"><input id="classification-xai-file" type="file" accept="image/jpeg,image/png,image/webp" required />
+          <span id="classification-xai-file-copy"><strong>Choose test sample</strong><small>JPEG, PNG, or WebP · one image · up to 12 MiB</small></span>
+          <img id="classification-xai-file-preview" class="hidden" alt="Selected test sample" /></label>
+        <div>
+          <label class="field"><span>Checkpoint on target machine</span><input id="classification-xai-checkpoint" list="classification-xai-checkpoints" placeholder="/runs/classifier/weights/best.pt" required /></label>
+          <datalist id="classification-xai-checkpoints"></datalist>
+          <div class="grid2">
+            <label class="field"><span>Target class</span><input id="classification-xai-target" value="predicted" placeholder="predicted or class name" /></label>
+            <label class="field"><span>Device</span><select id="classification-xai-device">${deviceOptions(selected?.gpus?.length ? 'cuda:0' : 'cpu')}</select></label>
+          </div>
+        </div>
+      </div>
+      <div class="grid2 xai-sample-run-controls">
+        <label class="field"><span>Machine</span><select id="classification-xai-machine">${machines.map((machine) => `<option value="${esc(machine.agentId)}" ${machine.agentId === selected?.agentId ? 'selected' : ''}>${esc(machineOptionLabel(machine))}</option>`).join('')}</select></label>
+        <div class="xai-sample-submit"><button type="submit" class="btn primary" id="classification-xai-run">Run test sample + xAI</button><span class="muted">Prediction, confidence, signed Grad-CAM, and stage activations</span></div>
+      </div>
+    </form>
+    <div id="classification-xai-test-status" class="evidence-status"><span class="muted">Choose a sample and a checkpoint to begin.</span></div>
+  </section>`;
+
+  const form = $('#classification-xai-test-form', container);
+  const fileInput = $('#classification-xai-file', container);
+  const preview = $('#classification-xai-file-preview', container);
+  const copy = $('#classification-xai-file-copy', container);
+  const machine = $('#classification-xai-machine', container);
+  const checkpoint = $('#classification-xai-checkpoint', container);
+  const options = $('#classification-xai-checkpoints', container);
+  const device = $('#classification-xai-device', container);
+  const status = $('#classification-xai-test-status', container);
+  const button = $('#classification-xai-run', container);
+  let previewUrl = '';
+
+  const updateCheckpoints = () => {
+    const rows = checkpoints.filter((item) => !machine.value || item.agentId === machine.value);
+    options.innerHTML = rows.map((item) => `<option value="${esc(item.checkpoint)}">${esc(item.agentId)}</option>`).join('');
+    const preferred = rows.find((item) => /classif|convnext|image.?class/i.test(item.checkpoint) && item.checkpoint.endsWith('/best.pt'));
+    if (!checkpoint.value && (preferred || rows.length === 1)) checkpoint.value = preferred?.checkpoint || rows[0].checkpoint;
+  };
+  machine.addEventListener('change', () => {
+    localStorage.setItem(TARGET_KEY, machine.value);
+    checkpoint.value = '';
+    const selectedMachine = machines.find((item) => item.agentId === machine.value);
+    device.value = selectedMachine?.gpus?.length ? 'cuda:0' : 'cpu';
+    updateCheckpoints();
+  });
+  updateCheckpoints();
+
+  fileInput.addEventListener('change', () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    const file = fileInput.files?.[0];
+    if (!file) {
+      preview.classList.add('hidden');
+      copy.classList.remove('hidden');
+      return;
+    }
+    previewUrl = URL.createObjectURL(file);
+    preview.src = previewUrl;
+    preview.classList.remove('hidden');
+    copy.classList.add('hidden');
+    copy.innerHTML = `<strong>${esc(file.name)}</strong><small>${fmtBytes(file.size)} · ready to test</small>`;
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const file = fileInput.files?.[0];
+    if (!file) return toast('Choose one test image', true);
+    if (file.size > 12 * 1024 * 1024) return toast('Test sample must be 12 MiB or smaller', true);
+    button.disabled = true;
+    button.textContent = 'Uploading sample…';
+    try {
+      const uploaded = await api('/samples', { method: 'POST', body: {
+        name: file.name, type: file.type, data: await fileDataUrl(file),
+      } });
+      const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+      const params = {
+        name: `classifier_xai_sample_${stamp}`,
+        source: `sample://${uploaded.sample.id}`,
+        checkpoint: checkpoint.value.trim(),
+        target: $('#classification-xai-target', container).value.trim() || 'predicted',
+        maxImages: 1, activationChannels: 4, intensity: 0.72,
+        device: device.value, project: CONFIG.defaults.runsDir,
+        targetAgentId: machine.value,
+      };
+      if (!params.checkpoint) throw new Error('Checkpoint is required');
+      button.textContent = 'Queueing xAI…';
+      const { job } = await api('/jobs', { method: 'POST', body: { type: 'classifier_xai', params } });
+      localStorage.setItem(XAI_SAMPLE_JOB_KEY, job.id);
+      toast(`Queued test sample ${job.name}`);
+      await watchClassificationXaiSample(status, viewer, job.id);
+    } catch (error) {
+      status.innerHTML = `<div class="warn-banner">${esc(error.message || 'Unable to run test sample')}</div>`;
+      toast(error.message, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Run test sample + xAI';
+    }
+  });
+
+  const activeJobId = localStorage.getItem(XAI_SAMPLE_JOB_KEY);
+  return { status, activeJobId };
+}
+
 async function renderEvidence(main) {
   const family = currentFamily();
-  main.innerHTML = `<div class="model-registry-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">xAI and evidence</h2>
-      <p class="page-sub">Browse reports, prediction visuals, augmentation previews, saliency maps, and mask/background diagnostics produced by Trainer runs.</p></div>
+  const context = family === 'classification'
+    ? await Promise.all([api('/agents'), api('/inventory')]).catch(() => [{ agents: {} }, { inventory: {} }])
+    : [{ agents: {} }, { inventory: {} }];
+  const agents = context[0].agents || {};
+  const inventory = context[1].inventory || {};
+  main.innerHTML = `<div class="model-registry-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">xAI</h2>
+      <p class="page-sub">Inspect each test sample together with its prediction, confidence, and explanation.</p></div>
       <div class="row"><a class="btn" href="#/models">Model registry</a><button class="btn primary" id="evidence-refresh">Refresh</button></div></div>
-    <section class="evidence-tools card"><label class="field"><span>Find evidence</span><input id="evidence-query" placeholder="run, checkpoint, class, mask…" /></label>
-      <label class="field"><span>Artifact type</span><select id="evidence-kind"><option value="all">All evidence</option><option value="xai">xAI / saliency</option><option value="mask-diagnostic">Mask/background diagnostics</option><option value="augmentation">Augmentation previews</option><option value="visual">Prediction visuals</option><option value="report">Reports</option><option value="metrics">Metrics</option><option value="predictions">Predictions</option><option value="model">Models</option><option value="document">Other documents</option></select></label></section>
-    ${family === 'classification' ? '<div id="classification-xai-viewer"></div>' : ''}
-    <div id="evidence-status" class="evidence-status"><span class="muted">Loading run evidence…</span></div>
-    <section id="evidence-grid" class="evidence-grid"></section>`;
+    ${family === 'classification'
+      ? '<div id="classification-xai-test"></div><div id="classification-xai-viewer"></div>'
+      : '<div class="empty">No sample-level xAI results are available for this model family yet.</div>'}`;
 
-  let timer = null;
-  const load = async () => {
-    $('#evidence-status').innerHTML = '<span class="muted">Loading run evidence…</span>';
-    try {
-      const query = $('#evidence-query').value.trim();
-      const kind = $('#evidence-kind').value;
-      const value = await api(`/evidence?family=${encodeURIComponent(family)}&kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(query)}&limit=300`);
-      const items = value.items || [];
-      const kinds = new Set(items.map((item) => item.kind));
-      $('#evidence-status').innerHTML = `<div><strong>${items.length}</strong> artifact${items.length === 1 ? '' : 's'} · scanned ${Number(value.scanned || 0).toLocaleString()} files</div><span class="muted">${kinds.size} evidence type${kinds.size === 1 ? '' : 's'} · ${esc(value.root)}</span>`;
-      $('#evidence-grid').innerHTML = items.map((item) => `<article class="evidence-card ${esc(item.kind)}">
-        ${item.url && ['visual', 'xai', 'mask-diagnostic', 'augmentation'].includes(item.kind) ? `<a class="evidence-preview" href="${esc(item.url)}" target="_blank" rel="noopener"><img loading="lazy" data-source="${esc(item.url)}" src="${esc(item.url)}" alt="${esc(item.name)}" /><span>Preview unavailable · retry or open artifact</span></a>` : ''}
-        <header><span class="model-family">${esc(item.kind.replaceAll('-', ' '))}</span><h3>${esc(item.name)}</h3></header>
-        <code class="evidence-path">${esc(item.relativePath)}</code>
-        <dl class="model-specs"><div><dt>Machine</dt><dd>${esc(item.agentId || 'control-plane')}${item.remote ? ' · remote' : ''}</dd></div><div><dt>Size</dt><dd>${fmtBytes(item.size)}</dd></div></dl>
-        <footer>${item.url ? `<a class="btn small primary" href="${esc(item.url)}" target="_blank" rel="noopener">${item.kind === 'report' ? 'Open report' : 'Open artifact'} ↗</a>` : '<span class="model-no-evidence">Indexed on remote agent; open from that machine.</span>'}</footer>
-      </article>`).join('') || '<div class="empty">No evidence artifacts match these filters yet. Run predict, evaluate/report, or augmentation preview first.</div>';
-      bindEvidenceImageRetry();
-    } catch (error) {
-      $('#evidence-status').innerHTML = `<div class="warn-banner">${esc(error.message || 'Unable to load evidence')} <button type="button" class="btn small" id="evidence-retry">Retry</button></div>`;
-      $('#evidence-retry')?.addEventListener('click', load);
-    }
-  };
-  $('#evidence-refresh').addEventListener('click', load);
-  $('#evidence-kind').addEventListener('change', load);
-  $('#evidence-query').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
-  if (family === 'classification') await loadClassificationXaiViewer($('#classification-xai-viewer'));
-  await load();
+  $('#evidence-refresh').addEventListener('click', () => renderEvidence(main));
+  if (family === 'classification') {
+    const viewer = $('#classification-xai-viewer');
+    const sampleTest = renderClassificationXaiTest($('#classification-xai-test'), viewer, agents, inventory);
+    await loadClassificationXaiViewer(viewer);
+    if (sampleTest.activeJobId) watchClassificationXaiSample(sampleTest.status, viewer, sampleTest.activeJobId);
+  }
 }
 
 async function renderHistory(main) {
-  const { jobs } = await api('/jobs?limit=500');
-  const familyJobs = jobs.filter(familyMatches);
-  main.innerHTML = `<h2 class="page-title">History</h2><p class="page-sub">${familyLabel()} jobs queued by all operators</p>
-    <div class="row filter-bar"><label class="field"><span>Status</span><select id="history-status"><option value="">All</option><option>queued</option><option>running</option><option>completed</option><option>failed</option><option>cancelled</option></select></label><span class="count" id="history-count"></span></div>
-    <div class="card" id="history-table"></div>`;
+  const [{ jobs }, { runs }] = await Promise.all([api('/jobs?limit=500'), api('/runs?limit=1000')]);
+  const artifactPaths = new Set(jobs.flatMap((job) => job.artifacts || []).map(String));
+  const discovered = (runs || []).filter((run) => !artifactPaths.has(String(run.path)));
+  main.innerHTML = `<h2 class="page-title">History</h2><p class="page-sub">Web-queued jobs and completed runs discovered on every connected Trainer machine.</p>
+    <div class="row filter-bar">
+      <label class="field"><span>Model family</span><select id="history-family"><option value="all">All model families</option>${Object.entries(FAMILIES).map(([key, value]) => `<option value="${esc(key)}">${esc(value.label)}</option>`).join('')}</select></label>
+      <label class="field"><span>Status</span><select id="history-status"><option value="">All statuses</option><option>queued</option><option>running</option><option>completed</option><option>failed</option><option>cancelled</option></select></label>
+      <span class="count" id="history-count"></span></div>
+    <div class="card"><h3>Control-plane jobs</h3><div id="history-table"></div></div>
+    <div class="card"><h3>Discovered runs</h3><p class="muted">Includes runs launched directly on a VM and per-family entries from <code>vm_smoke_matrix/summary.json</code>.</p><div id="discovered-history-table"></div></div>`;
   const draw = () => {
     const status = $('#history-status').value;
-    const filtered = familyJobs.filter((job) => !status || job.status === status);
+    const family = $('#history-family').value;
+    const filtered = jobs.filter((job) => (family === 'all' || String(job.type).startsWith(FAMILIES[family]?.prefix || '')) && (!status || job.status === status));
+    const filteredRuns = discovered.filter((run) => (family === 'all' || run.family === family) && (!status || run.status === status));
     $('#history-table').innerHTML = jobTable(filtered);
-    $('#history-count').textContent = `${filtered.length} job${filtered.length === 1 ? '' : 's'}`;
+    $('#discovered-history-table').innerHTML = discoveredRunTable(filteredRuns);
+    $('#history-count').textContent = `${filtered.length} job${filtered.length === 1 ? '' : 's'} · ${filteredRuns.length} discovered run${filteredRuns.length === 1 ? '' : 's'}`;
     bindJobRows();
+    bindDiscoveredRuns();
   };
   $('#history-status').addEventListener('change', draw);
+  $('#history-family').addEventListener('change', draw);
   draw();
 }
 

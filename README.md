@@ -14,9 +14,9 @@ the identity of the framework.
 | Family | Train | Evaluate | Predict | Deploy artifact |
 |---|---:|---:|---:|---|
 | Detection | yes | yes + report | yes | ONNX / TensorRT |
-| Image classification | yes + resume/finetune/tune | yes + thresholds/report | yes + top-k/rejection/xAI | ONNX + class contract |
-| Video/action classification | yes | yes | yes | ONNX + clip contract |
-| VLM | PEFT LoRA | training metrics | — | adapter or merged model |
+| Image classification | yes + resume/finetune/tune | yes + thresholds/report | yes + top-k/rejection/xAI | ONNX / TensorRT + class contract |
+| Video/action classification | yes | yes | yes | ONNX / TensorRT + clip contract |
+| VLM | PEFT LoRA | training metrics | — | ONNX / TensorRT forward graph, adapter, or merged model |
 
 Every family now goes through the same task/architecture registry:
 
@@ -35,6 +35,11 @@ trainer finetune task=classification data=/data/new-species \
 trainer evaluate task=classification data=/data/species \
   checkpoint=/runs/species/weights/best.pt project=/runs name=species-eval
 trainer tune task=classification arch=convnext-tiny data=/data/species iterations=10 tune_epochs=5
+
+# deploy artifacts (also available as separate ONNX/TensorRT buttons in the UI)
+trainer export task=classification checkpoint=/runs/species/weights/best.pt format=onnx
+trainer export task=video-classification checkpoint=/runs/actions/best.pt format=tensorrt device=cuda:0
+trainer export task=vlm model=org/model adapter=/runs/vlm/adapter format=onnx
 ```
 
 See [`docs/CLASSIFICATION.md`](docs/CLASSIFICATION.md) for the complete command
@@ -224,6 +229,6 @@ artifact flow for all four Trainer families. Video/action classification uses a
 compact R(2+1)D architecture plugin. VLM tuning writes portable PEFT LoRA
 adapters and can merge an adapter into its base model for deployment.
 The web layer also exposes the live architecture-plugin registry, interactive
-model-flow diagrams, and a cross-family xAI/evidence browser for reports,
-prediction visuals, augmentation previews, saliency maps, and mask/background
-diagnostics.
+model-flow diagrams, and a sample-level xAI view. The xAI product contract is a
+model result—not a filesystem browser—so manifests, metrics, paths, and generic
+run artifacts are not exposed there.

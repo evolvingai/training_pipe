@@ -6,10 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { clearSessionCookie, makeSession, sessionCookie, sessionUser, validAgent, validLogin } from './auth.js';
 import { loadArchitectureCatalog } from './architecture-registry.js';
 import { config } from './config.js';
-import { evidenceContentType, resolveEvidenceFile, scanEvidence } from './evidence.js';
+import { evidenceSyncLimits, saveSyncedEvidence } from './evidence.js';
 import { makePowerDriver } from './power.js';
 import { buildRecipe, recipeCatalog } from './recipes.js';
+import { discoverRuns } from './runs.js';
+import { resolveSample, sampleLimits, saveSample } from './samples.js';
 import { FileStore, newId } from './store.js';
+import { listClassificationXaiResults, resolveClassificationXaiAsset } from './xai-results.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(moduleDir, '..', 'public');
@@ -43,22 +46,28 @@ function architectureCatalog(refresh = false) {
   }));
 }
 
-function evidenceMatches(item, { family, kind, query }) {
-  if (family && family !== 'all' && item.family !== family && item.family !== 'unknown') return false;
-  if (kind && kind !== 'all' && item.kind !== kind) return false;
-  return !query || String(item.relativePath || '').toLowerCase().includes(query.toLowerCase());
-}
-
-async function body(req) {
+async function body(req, maxBytes = 1_000_000) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 1_000_000) throw new Error('request body is too large');
+    if (size > maxBytes) throw new Error('request body is too large');
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function sendSample(res, sample) {
+  res.writeHead(200, {
+    'content-type': sample.type,
+    'content-length': sample.stat.size,
+    'cache-control': 'private, max-age=3600',
+    'x-content-type-options': 'nosniff',
+    'x-trainer-sample-name': encodeURIComponent(sample.name),
+  });
+  fs.createReadStream(sample.path).pipe(res);
+  return true;
 }
 
 function jobId(pathname, suffix = '') {
@@ -147,9 +156,36 @@ async function api(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/architectures') {
     return send(res, 200, await architectureCatalog(url.searchParams.get('refresh') === 'true'));
   }
+  if (req.method === 'POST' && pathname === '/api/samples') {
+    try {
+      const sample = saveSample(config.dataDir, await body(req, sampleLimits.requestBytes));
+      return send(res, 201, { sample: { ...sample, url: `/api/samples/${sample.id}` } });
+    } catch (reason) {
+      return error(res, 400, reason);
+    }
+  }
+  const sampleId = pathname.match(/^\/api\/samples\/([A-Za-z0-9_-]+)$/)?.[1];
+  if (req.method === 'GET' && sampleId) {
+    try { return sendSample(res, resolveSample(config.dataDir, sampleId)); }
+    catch (reason) { return error(res, 404, reason); }
+  }
   if (req.method === 'GET' && pathname === '/api/jobs') {
     const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '100', 10), 500);
     return send(res, 200, { jobs: await store.listJobs(limit) });
+  }
+  if (req.method === 'GET' && pathname === '/api/runs') {
+    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '500', 10), 1_000);
+    const local = discoverRuns(config.vmDefaults.runsDir, { limit });
+    const localPaths = new Set(local.map((run) => path.resolve(run.path)));
+    const inventory = (await store.getState('inventory')) || {};
+    const remote = Object.entries(inventory).flatMap(([agentId, value]) => (value.runs || [])
+      .filter((run) => !localPaths.has(path.resolve(String(run.path || ''))))
+      .map((run) => ({ ...run, id: `${agentId}:${run.id}`, agentId, remote: true })));
+    const runs = [
+      ...local.map((run) => ({ ...run, agentId: 'control-plane', remote: false })),
+      ...remote,
+    ].sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0)).slice(0, limit);
+    return send(res, 200, { root: config.vmDefaults.runsDir, runs });
   }
   if (req.method === 'POST' && pathname === '/api/preview') {
     const input = await body(req);
@@ -198,32 +234,22 @@ async function api(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/inventory') {
     return send(res, 200, { inventory: (await store.getState('inventory')) || {} });
   }
-  if (req.method === 'GET' && pathname === '/api/evidence') {
-    const filters = {
-      family: String(url.searchParams.get('family') || ''),
-      kind: String(url.searchParams.get('kind') || ''),
-      query: String(url.searchParams.get('q') || ''),
-      limit: Math.min(Number.parseInt(url.searchParams.get('limit') || '200', 10), 500),
-    };
-    const local = scanEvidence(config.vmDefaults.runsDir, filters);
-    const inventory = (await store.getState('inventory')) || {};
-    const localPaths = new Set(local.items.map((item) => item.relativePath));
-    const remote = Object.entries(inventory).flatMap(([agentId, value]) => (value.evidence || [])
-      .filter((item) => !localPaths.has(item.relativePath) && evidenceMatches(item, filters))
-      .map((item) => ({ ...item, agentId, remote: true, url: null })));
+  if (req.method === 'GET' && pathname === '/api/xai/classification') {
     return send(res, 200, {
-      root: local.root,
-      scanned: local.scanned,
-      items: [...local.items.map((item) => ({ ...item, agentId: 'control-plane', remote: false })), ...remote]
-        .sort((left, right) => Number(right.modifiedAt || 0) - Number(left.modifiedAt || 0))
-        .slice(0, filters.limit),
+      runs: listClassificationXaiResults(config.vmDefaults.runsDir, {
+        runId: String(url.searchParams.get('run') || ''),
+        limit: Math.min(Number.parseInt(url.searchParams.get('limit') || '100', 10), 200),
+      }),
     });
   }
-  if (req.method === 'GET' && pathname === '/api/evidence/file') {
+  const xaiAsset = pathname.match(/^\/api\/xai\/classification\/([^/]+)\/samples\/(\d+)\/(input|signed-map|activations)$/);
+  if (req.method === 'GET' && xaiAsset) {
     try {
-      const file = resolveEvidenceFile(config.vmDefaults.runsDir, url.searchParams.get('path'));
+      const file = resolveClassificationXaiAsset(
+        config.vmDefaults.runsDir, decodeURIComponent(xaiAsset[1]), Number(xaiAsset[2]), xaiAsset[3],
+      );
       res.writeHead(200, {
-        'content-type': evidenceContentType(file.path),
+        'content-type': file.contentType,
         'content-length': file.stat.size,
         'cache-control': 'private, max-age=60',
         'x-content-type-options': 'nosniff',
@@ -254,6 +280,20 @@ async function api(req, res, url) {
 async function agentApi(req, res, url) {
   if (!validAgent(req, config.agentToken)) return error(res, 401, 'invalid agent token');
   const pathname = url.pathname;
+
+  const sampleId = pathname.match(/^\/api\/agent\/samples\/([A-Za-z0-9_-]+)$/)?.[1];
+  if (req.method === 'GET' && sampleId) {
+    try { return sendSample(res, resolveSample(config.dataDir, sampleId)); }
+    catch (reason) { return error(res, 404, reason); }
+  }
+  if (req.method === 'POST' && pathname === '/api/agent/xai/upload') {
+    try {
+      const saved = saveSyncedEvidence(config.vmDefaults.runsDir, await body(req, evidenceSyncLimits.requestBytes));
+      return send(res, 201, { evidence: saved });
+    } catch (reason) {
+      return error(res, 400, reason);
+    }
+  }
 
   if (req.method === 'POST' && pathname === '/api/agent/heartbeat') {
     const input = await body(req);

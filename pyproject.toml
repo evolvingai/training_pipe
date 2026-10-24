@@ -17,8 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 track = ["mlflow>=2.9"]
-deploy = ["onnx>=1.16", "tensorrt>=8.6", "onnxruntime>=1.16", "pycuda"]
-vlm = ["transformers>=4.55,<6", "peft>=0.13", "accelerate>=1.0", "pillow>=10", "safetensors>=0.4"]
+deploy = ["onnx>=1.16", "onnxscript>=0.1", "onnxsim>=0.4", "tensorrt>=8.6", "onnxruntime>=1.16", "pycuda"]
+vlm = ["transformers>=4.55,<5", "peft>=0.13", "accelerate>=1.0", "pillow>=10", "safetensors>=0.4"]
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8"]
 
 [project.scripts]

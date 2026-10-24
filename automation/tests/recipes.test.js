@@ -67,6 +67,13 @@ test('classifier recipes expose the detector-parity lifecycle', () => {
   assert.ok(xai.commands[0].argv.includes('max_images=12'));
   assert.ok(xai.commands[0].argv.includes('activation_channels=4'));
   assert.deepEqual(xai.artifacts, ['/runs/species-xai']);
+
+  const uploadedSample = buildRecipe('classifier_xai', {
+    name: 'one-sample', source: 'sample://0123456789abcdef',
+    checkpoint: '/runs/species/weights/best.pt', maxImages: 1,
+  }, defaults);
+  assert.ok(uploadedSample.commands[0].argv.includes('source=sample://0123456789abcdef'));
+  assert.ok(uploadedSample.commands[0].argv.includes('max_images=1'));
 });
 
 test('video/action recipes expose clip sampling and a CPU-safe default', () => {
@@ -105,6 +112,44 @@ test('detector export uses a deterministic artifact directory', () => {
   }, defaults);
   assert.ok(recipe.commands[0].argv.includes('out=/runs/deployment/model'));
   assert.deepEqual(recipe.artifacts, ['/runs/deployment']);
+});
+
+test('every model family exposes ONNX and TensorRT export recipes', () => {
+  const detector = buildRecipe('detect_export', {
+    name: 'detector-trt', checkpoint: '/runs/detector/weights/best.pt', format: 'tensorrt', device: 'cuda:0',
+  }, defaults);
+  assert.ok(detector.commands[0].argv.includes('format=tensorrt'));
+
+  const classifier = buildRecipe('classifier_export', {
+    name: 'classifier-onnx', checkpoint: '/runs/classifier/weights/best.pt', format: 'onnx',
+  }, defaults);
+  assert.ok(classifier.commands[0].argv.includes('task=classification'));
+  assert.ok(classifier.commands[0].argv.includes('format=onnx'));
+
+  const video = buildRecipe('video_export', {
+    name: 'video-trt', checkpoint: '/runs/video/best.pt', format: 'tensorrt', device: 'cuda:0', half: true,
+  }, defaults);
+  assert.ok(video.commands[0].argv.includes('task=video-classification'));
+  assert.ok(video.commands[0].argv.includes('format=tensorrt'));
+  assert.ok(video.commands[0].argv.includes('half=true'));
+
+  const vlm = buildRecipe('vlm_export', {
+    name: 'vlm-trt', model: 'org/vlm', adapter: '/runs/vlm/adapter', format: 'tensorrt', device: 'cuda:0',
+  }, defaults);
+  assert.ok(vlm.commands[0].argv.includes('task=vlm'));
+  assert.ok(vlm.commands[0].argv.includes('export'));
+  assert.ok(vlm.commands[0].argv.includes('format=tensorrt'));
+  assert.ok(vlm.commands[0].argv.includes('opset=18'));
+  assert.ok(vlm.commands[0].argv.includes('adapter=/runs/vlm/adapter'));
+});
+
+test('TensorRT export cannot be queued to a CPU-only device', () => {
+  assert.throws(() => buildRecipe('classifier_export', {
+    name: 'bad-trt', checkpoint: '/runs/model.pt', format: 'tensorrt', device: 'cpu',
+  }, defaults), /requires a CUDA device/);
+  assert.throws(() => buildRecipe('vlm_export', {
+    name: 'bad-vlm-trt', model: 'org/vlm', format: 'tensorrt', device: 'cpu',
+  }, defaults), /requires a CUDA device/);
 });
 
 test('invalid devices and model aliases are rejected', () => {

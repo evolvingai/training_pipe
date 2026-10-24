@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { scanEvidence } from '../server/evidence.js';
+import { discoverRuns } from '../server/runs.js';
 
 const env = process.env;
 const controlUrl = String(env.CONTROL_PLANE_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
@@ -15,6 +15,7 @@ const runsRoot = path.resolve(env.VM_RUNS_DIR || '/runs');
 const acceptedTypes = String(env.AGENT_TYPES || '').split(',').map((value) => value.trim()).filter(Boolean);
 const gpuDisabled = String(env.AGENT_DISABLE_GPU || '').toLowerCase() === 'true';
 const cancelled = new Set();
+const sampleCache = new Map();
 let activeChild = null;
 let activeJobId = null;
 let stopping = false;
@@ -107,9 +108,11 @@ function checkpoints(root, depth = 0) {
 }
 
 async function inventory() {
-  const evidence = scanEvidence(runsRoot, { limit: 500 }).items.map(({ url: _url, ...item }) => item);
   await api('/inventory', {
-    method: 'POST', value: { agentId, runsRoot, checkpoints: checkpoints(runsRoot), evidence, scannedAt: Date.now() },
+    method: 'POST', value: {
+      agentId, runsRoot, checkpoints: checkpoints(runsRoot),
+      runs: discoverRuns(runsRoot, { limit: 500 }), scannedAt: Date.now(),
+    },
   });
 }
 
@@ -123,6 +126,70 @@ function printable(command) {
   return command.argv.map((value) => /[\s"']/.test(value) ? JSON.stringify(value) : value).join(' ');
 }
 
+async function downloadSample(id) {
+  if (sampleCache.has(id) && fs.existsSync(sampleCache.get(id))) return sampleCache.get(id);
+  const response = await fetch(`${controlUrl}/api/agent/samples/${encodeURIComponent(id)}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new Error(`sample ${id}: HTTP ${response.status} ${await response.text()}`);
+  const types = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+  const contentType = String(response.headers.get('content-type') || '').split(';')[0].toLowerCase();
+  const extension = types[contentType];
+  if (!extension) throw new Error(`sample ${id}: unsupported content type ${contentType || '(missing)'}`);
+  const value = Buffer.from(await response.arrayBuffer());
+  if (!value.length || value.length > 12 * 1024 * 1024) throw new Error(`sample ${id}: invalid size`);
+  const directory = path.join(runsRoot, '.samples');
+  fs.mkdirSync(directory, { recursive: true });
+  const destination = path.join(directory, `${id}${extension}`);
+  const temporary = `${destination}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, value);
+  fs.renameSync(temporary, destination);
+  sampleCache.set(id, destination);
+  return destination;
+}
+
+async function materializeSamples(command) {
+  const argv = [];
+  for (const value of command.argv) {
+    const match = String(value).match(/^(source=)?sample:\/\/([A-Za-z0-9_-]{12,80})$/);
+    if (!match) argv.push(value);
+    else argv.push(`${match[1] || ''}${await downloadSample(match[2])}`);
+  }
+  return { ...command, argv };
+}
+
+async function syncClassifierXai(job) {
+  if (job.type !== 'classifier_xai') return 0;
+  const files = new Set();
+  for (const artifact of job.artifacts || []) {
+    const runRoot = path.resolve(artifact);
+    const manifestPath = path.join(runRoot, 'xai', 'manifest.json');
+    if (!fs.existsSync(manifestPath)) continue;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const item of manifest.images || []) {
+      for (const key of ['input', 'signed_map', 'activations']) {
+        if (!item[key]) continue;
+        const file = path.resolve(runRoot, item[key]);
+        if (file.startsWith(`${runRoot}${path.sep}`) && fs.existsSync(file)) files.add(file);
+      }
+    }
+    files.add(manifestPath);
+  }
+  let uploaded = 0;
+  const ordered = [...files].sort((left, right) => Number(left.endsWith('manifest.json')) - Number(right.endsWith('manifest.json')));
+  for (const file of ordered) {
+    const relativePath = path.relative(runsRoot, file).split(path.sep).join('/');
+    if (!relativePath || relativePath.startsWith('../')) continue;
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > 12 * 1024 * 1024) continue;
+    await api('/xai/upload', {
+      method: 'POST', value: { relativePath, data: fs.readFileSync(file).toString('base64') },
+    });
+    uploaded += 1;
+  }
+  return uploaded;
+}
+
 async function runCommand(job, command) {
   if (!Array.isArray(command.argv) || !command.argv.length) throw new Error(`step ${command.id} has no argv`);
   if (job.dryRun) {
@@ -132,10 +199,11 @@ async function runCommand(job, command) {
   if (!fs.existsSync(command.cwd) || !fs.statSync(command.cwd).isDirectory()) {
     throw new Error(`working directory does not exist: ${command.cwd}`);
   }
-  await pushLog(job.id, [`[agent] cwd=${command.cwd}`, `[agent] ${printable(command)}`]);
+  const runnable = await materializeSamples(command);
+  await pushLog(job.id, [`[agent] cwd=${runnable.cwd}`, `[agent] ${printable(runnable)}`]);
   return new Promise((resolve, reject) => {
-    const child = spawn(command.argv[0], command.argv.slice(1), {
-      cwd: command.cwd, env: { ...process.env, ...(command.env || {}) },
+    const child = spawn(runnable.argv[0], runnable.argv.slice(1), {
+      cwd: runnable.cwd, env: { ...process.env, ...(runnable.env || {}) },
       shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     activeChild = child;
@@ -194,6 +262,12 @@ async function runJob(job) {
       if (exitCode !== 0) throw new Error(`step ${command.id} exited with code ${exitCode}`);
     }
     const artifacts = (job.artifacts || []).filter((artifact) => fs.existsSync(artifact));
+    try {
+      const synced = await syncClassifierXai({ ...job, artifacts });
+      if (synced) await pushLog(job.id, [`[agent] synced ${synced} xAI evidence file(s) to the control plane`]);
+    } catch (error) {
+      await pushLog(job.id, [`[agent] xAI evidence sync warning: ${error.message || error}`]);
+    }
     await pushLog(job.id, ['[agent] job completed']);
     // Terminal status may trigger VM deallocation, so upload the final log first.
     await update(job.id, { status: 'completed', artifacts });

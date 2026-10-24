@@ -44,7 +44,7 @@ body::before {
 a { color: var(--teal); text-decoration: none; }
 code { font-family: var(--mono); }
 
-/* Same login shell as gender_automation. */
+/* Authentication shell. */
 .login-overlay {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 50;
 }
@@ -62,7 +62,7 @@ code { font-family: var(--mono); }
 .login-card p { margin: 0 0 26px; font-size: 13px; }
 .login-card input { width: 100%; margin-bottom: 14px; text-align: center; }
 
-/* Same fixed sidebar / family switch layout as gender_automation. */
+/* Fixed sidebar and family switch layout. */
 .shell { display: flex; min-height: 100vh; }
 .sidebar {
   width: 216px; flex-shrink: 0;
@@ -340,11 +340,35 @@ tr.clickable:hover td { background: rgba(255, 255, 255, 0.04); }
 .evidence-preview.failed span { display: block; }
 .evidence-card.mask-diagnostic { border-color: rgba(255,214,10,.24); }
 .evidence-card.xai { border-color: rgba(100,210,255,.24); }
+.classification-xai-test { margin-bottom: 18px; border-color: rgba(10,132,255,.34); }
+.classification-xai-test h3 { margin: 4px 0 5px; font-size: 19px; }
+.classification-xai-test-grid { display: grid; grid-template-columns: minmax(250px, .7fr) minmax(380px, 1.3fr); gap: 18px; margin: 18px 0; }
+.xai-sample-picker { min-height: 210px; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; text-align: center; border: 1px dashed rgba(100,210,255,.38); border-radius: 12px; background: rgba(10,132,255,.055); }
+.xai-sample-picker:hover { border-color: rgba(100,210,255,.68); background: rgba(10,132,255,.09); }
+.xai-sample-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; z-index: 2; }
+.xai-sample-picker span { display: flex; flex-direction: column; gap: 6px; padding: 24px; }
+.xai-sample-picker strong { font-size: 15px; }
+.xai-sample-picker small { color: var(--muted); }
+.xai-sample-picker img { width: 100%; height: 250px; object-fit: contain; background: rgba(0,0,0,.32); }
+.xai-sample-picker img:not(.hidden) + span { display: none; }
+.xai-sample-run-controls { align-items: end; }
+.xai-sample-submit { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; padding-bottom: 16px; }
+.classification-xai-test .evidence-status { padding-top: 13px; margin-top: 4px; border-top: 1px solid var(--stroke-soft); }
 .classification-xai-live { margin-bottom: 18px; border-color: rgba(100,210,255,.28); }
 .classification-xai-live h3 { margin: 4px 0 5px; font-size: 19px; }
+.classification-xai-catalog { margin-bottom: 14px; display: grid; grid-template-columns: minmax(300px, 1fr) minmax(280px, .55fr); gap: 18px; align-items: end; border-color: rgba(100,210,255,.20); }
+.classification-xai-catalog h3 { margin: 4px 0 5px; font-size: 19px; }
+.classification-xai-catalog .field { margin: 0; }
+.evidence-output-files { margin-top: 18px; }
+.evidence-output-files > .muted { margin: 12px 0; }
+.evidence-output-files .evidence-tools { padding: 0; margin-top: 14px; }
 .classification-xai-controls { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(220px, .8fr); gap: 14px; margin: 16px 0; }
 .classification-xai-controls .field { margin: 0; }
 .classification-xai-controls input[type="range"] { padding: 0; accent-color: var(--accent); }
+.classification-xai-prediction { display: flex; align-items: baseline; gap: 10px; margin: -2px 0 13px; padding: 10px 13px; border-radius: 9px; background: rgba(100,210,255,.07); border: 1px solid rgba(100,210,255,.16); }
+.classification-xai-prediction span { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.classification-xai-prediction strong { font-size: 17px; }
+.classification-xai-prediction b { margin-left: auto; color: var(--teal); font-size: 16px; }
 .classification-xai-stage { display: grid; grid-template-columns: minmax(280px, .9fr) minmax(340px, 1.1fr); gap: 14px; }
 .classification-xai-stage figure { margin: 0; min-height: 260px; background: rgba(0,0,0,.26); border: 1px solid var(--stroke-soft); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; justify-content: center; }
 .classification-xai-stage canvas, .classification-xai-stage img { display: block; width: 100%; max-height: 560px; object-fit: contain; }
@@ -357,7 +381,7 @@ tr.clickable:hover td { background: rgba(255, 255, 255, 0.04); }
 .classification-xai-scores strong { color: var(--text); }
 
 @media (max-width: 900px) {
-  .grid2, .adv-grid, .model-registry-kpis, .model-registry-grid, .evidence-grid, .model-registry-tools, .evidence-tools, .classification-xai-controls, .classification-xai-stage { grid-template-columns: 1fr; }
+  .grid2, .adv-grid, .model-registry-kpis, .model-registry-grid, .evidence-grid, .model-registry-tools, .evidence-tools, .classification-xai-test-grid, .classification-xai-controls, .classification-xai-stage, .classification-xai-catalog { grid-template-columns: 1fr; }
   .sidebar { width: 190px; }
   main { padding: 30px 24px; }
   .model-registry-head { flex-direction: column; }

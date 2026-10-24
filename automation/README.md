@@ -17,16 +17,20 @@ the same plugin registry.
   hyperparameter tuning.
 - Detector-parity image-classifier recipes: train/resume, finetune, evaluate,
   per-class threshold tuning, HTML report, top-k prediction, hyperparameter
-  tuning, augmentation preview, data benchmark, and ONNX export.
-- Recipes for video/action train, evaluate, predict, and ONNX export. The
+  tuning, augmentation preview, data benchmark, and ONNX/TensorRT export.
+- Recipes for video/action train, evaluate, predict, and ONNX/TensorRT export. The
   baseline uses a frame encoder plus GRU and can run on CPU.
-- VLM multimodal JSONL validation, PEFT LoRA tuning, adapter artifacts, and
-  adapter-to-base-model merge.
+- VLM multimodal JSONL validation, PEFT LoRA tuning, adapter artifacts,
+  adapter-to-base-model merge, and fixed-shape ONNX/TensorRT forward export.
 - CPU, CUDA, Apple MPS, and auto device selection. A CPU-only agent will not
   claim a job that explicitly requests CUDA.
 - Azure ARM and Google Compute Engine REST power drivers. Azure `stop`
   deallocates the VM; GCE `stop` stops it.
 - A dependency-free Node 20 control plane/agent and systemd deployment units.
+- A combined History ledger: persisted control-plane jobs plus completed runs
+  discovered under every agent's `VM_RUNS_DIR`. Direct CLI runs and the four
+  per-family entries in `vm_smoke_matrix/summary.json` therefore remain visible
+  even when they were not launched from the web UI.
 - One external `trainer.augmentation` subsystem and UI panel shared by detector,
   image-classifier, video/action, and VLM training. Profiles can be stored as TOML;
   video replays identical geometry across a clip and VLM disables multi-image transforms.
@@ -34,13 +38,15 @@ the same plugin registry.
   including input/output contracts, training strategy, aliases, and an interactive
   per-family model-flow diagram. External `trainer.architectures` entry points
   appear without a web-code change.
-- A cross-family xAI/evidence browser for reports, metrics, predictions, rendered
-  outputs, augmentation previews, saliency/activation maps, and mask/background
-  diagnostics. GET requests and failed preview images retry once before showing a
-  recoverable error.
+- A sample-level xAI view that exposes inputs, predictions, confidence,
+  explanations, and activations as one result. It does not expose manifests,
+  metrics files, filesystem paths, or generic run artifacts.
 - ConvNeXt classification xAI that writes signed Grad-CAM overlays (red supports
   the selected class; blue opposes it), per-stage top activation channels,
   combined dossiers, a searchable HTML gallery, and an auditable JSON manifest.
+  The xAI page also has a selected-sample workflow: upload one test image, choose
+  its checkpoint and CPU/GPU target, and keep the prediction, confidence, signed
+  map, and feature activations together in the page.
 
 The control plane creates fixed argument arrays. The agent uses `spawn()` with
 `shell: false`; job parameters are never evaluated by a shell.
@@ -52,11 +58,17 @@ publish their family, input and output contracts, training strategy, and ordered
 flow stages through `ArchitecturePlugin`. The control plane caches that catalog
 for 30 seconds and exposes it through `GET /api/architectures`.
 
-The VM agent indexes evidence under `VM_RUNS_DIR` and publishes metadata with its
-normal inventory heartbeat. When the control plane shares that filesystem, local
-artifacts can be opened through the authenticated `GET /api/evidence/file`
-endpoint. Remote-agent artifacts remain visible with their machine and path but
-are not proxied through the control plane.
+The browser reads structured sample results through `GET /api/xai/classification`.
+Three opaque, authenticated image endpoints render the input, signed Grad-CAM,
+and stage activations. No generic evidence-list or arbitrary-file endpoint is
+available. For remote CPU/GPU runs, the agent syncs only the minimum internal
+record and those three images needed to render the same sample result.
+
+Selected test images are stored behind authentication on the control plane. The
+chosen agent downloads the opaque `sample://…` reference over its existing
+authenticated outbound connection before inference, so operators do not need to
+copy an ad-hoc image to the VM manually. JPEG, PNG, and WebP inputs up to 12 MiB
+are accepted.
 
 ## Architecture
 
@@ -143,7 +155,8 @@ optimizer/scheduler/scaler state, class names, input size, architecture, and
 metrics so a run can resume exactly. Evaluation also writes per-image metrics
 and optimized class thresholds; prediction supports top-k output and threshold
 rejection. Export writes a dynamic-batch ONNX graph and JSON preprocessing,
-class, and tensor contract.
+class, and tensor contract. TensorRT export retains the ONNX intermediate and
+writes an engine plus the same JSON contract.
 
 ## Video/action datasets
 
@@ -163,7 +176,8 @@ dataset/
 Each checkpoint records the class names, frame size, number of sampled frames,
 and temporal model shape. Evaluate writes accuracy and a confusion matrix;
 predict writes CSV; export writes an ONNX graph with `clips` shaped
-`batch × time × 3 × height × width` plus a JSON contract.
+`batch × time × 3 × height × width` plus a JSON contract. The same Export page
+can compile that graph into a TensorRT engine on a CUDA worker.
 
 ## VLM tuning datasets
 
@@ -182,7 +196,9 @@ The simplest JSONL format is one local image, prompt, and answer per row:
 Trainer also accepts multimodal `messages` rows. Images must be staged on the
 worker; remote image URLs are rejected so runs remain reproducible. A tune run
 writes `adapter/`, `run.json`, and `metrics.json`. The Export page merges that
-adapter with its base model when a standalone model directory is needed.
+adapter with its base model when a standalone model directory is needed. VLM
+ONNX/TensorRT export traces the selected sample image and prompt as a fixed-shape
+forward-logits contract; autoregressive decoding remains a serving-runtime concern.
 
 ## VM deployment
 

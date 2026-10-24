@@ -603,20 +603,36 @@ def export(args: argparse.Namespace) -> int:
     device = select_device(args.device)
     model, payload = load_checkpoint(Path(args.checkpoint), device)
     model.eval()
+    export_format = str(args.format).lower()
+    if export_format not in {"onnx", "tensorrt", "trt", "engine"}:
+        raise ValueError("format must be onnx or tensorrt")
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    stem = output.with_suffix("") if output.suffix.lower() in {".onnx", ".engine"} else output
+    onnx_output = stem.with_suffix(".onnx")
+    onnx_output.parent.mkdir(parents=True, exist_ok=True)
     dummy = torch.zeros(1, 3, int(payload["imgsz"]), int(payload["imgsz"]), device=device)
     torch.onnx.export(
-        model, dummy, output, input_names=["images"], output_names=["logits"],
-        opset_version=args.opset, dynamic_axes={"images": {0: "batch"}, "logits": {0: "batch"}},
+        model, dummy, onnx_output, input_names=["images"], output_names=["logits"],
+        opset_version=args.opset, dynamic_axes={"images": {0: "batch"}, "logits": {0: "batch"}}, dynamo=False,
     )
-    save_json(output.with_suffix(".json"), {
+    contract = {
         "format": "trainer-image-classifier-onnx-v1", "classes": payload["classes"],
         "architecture": payload.get("arch", "tiny-cnn"), "imgsz": payload["imgsz"],
         "normalization": {"scale": 255.0, "mean": [0.5, 0.5, 0.5], "std": [0.25, 0.25, 0.25]},
-        "input": "images", "output": "logits",
-    })
-    print(f"exported classifier: {output}")
+        "input": "images", "output": "logits", "onnx": str(onnx_output),
+    }
+    final_output = onnx_output
+    if export_format != "onnx":
+        from trainer.detection.engine.exporter import export_tensorrt
+
+        engine_output = stem.with_suffix(".engine")
+        final_output = export_tensorrt(
+            onnx_output, half=bool(args.half), workspace_gb=int(args.workspace), out_path=engine_output,
+        )
+        contract.update({"format": "trainer-image-classifier-tensorrt-v1", "engine": str(final_output),
+                         "precision": "fp16" if args.half else "fp32"})
+    save_json(stem.with_suffix(".json"), contract)
+    print(f"exported classifier: {final_output}")
     return 0
 
 
@@ -850,8 +866,11 @@ def parser() -> argparse.ArgumentParser:
     export_parser = sub.add_parser("export")
     export_parser.add_argument("--checkpoint", required=True)
     export_parser.add_argument("--output", required=True)
+    export_parser.add_argument("--format", choices=["onnx", "tensorrt", "trt", "engine"], default="onnx")
     export_parser.add_argument("--opset", type=int, default=17)
     export_parser.add_argument("--device", default="cpu")
+    export_parser.add_argument("--half", action=argparse.BooleanOptionalAction, default=False)
+    export_parser.add_argument("--workspace", type=int, default=4)
 
     threshold_parser = sub.add_parser("tune-thresh")
     _add_eval_arguments(threshold_parser)

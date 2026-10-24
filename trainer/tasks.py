@@ -82,11 +82,14 @@ def run_classification(action: str, params: dict[str, Any]) -> int:
         _option(argv, "source", params.get("source"))
     if action in {"finetune", "evaluate", "predict", "xai", "export", "tune-thresh", "report"}:
         _option(argv, "checkpoint", params.get("checkpoint") or params.get("model"))
+    export_format = str(params.get("format", "onnx")).lower()
     suffix = {
         "evaluate": "metrics.json", "predict": "predictions.csv", "export": "model.onnx",
         "tune-thresh": "thresholds.json", "report": "reports/report.html",
         "viz-augment": "plots/augment_preview.jpg", "bench-data": "logs/benchmark.json",
     }.get(action)
+    if action == "export" and export_format in {"tensorrt", "trt", "engine"}:
+        suffix = "model.engine"
     _option(argv, "output", output if suffix is None else output / suffix)
     if action in {"train", "finetune", "tune"}:
         _options(argv, params, (
@@ -113,7 +116,9 @@ def run_classification(action: str, params: dict[str, Any]) -> int:
     elif action == "xai":
         _options(argv, params, ("device", "target", "max_images", "intensity", "activation_channels"))
     elif action == "export":
-        _options(argv, params, ("device", "opset"))
+        _options(argv, params, ("device", "format", "opset", "workspace"))
+        if "half" in params:
+            _option(argv, "half", params["half"], boolean_optional=True)
     elif action == "viz-augment":
         _options(argv, params, ("imgsz", "n", "val_fraction", "seed", *AUGMENTATION_OPTIONS))
     elif action == "bench-data":
@@ -135,17 +140,39 @@ def run_video(action: str, params: dict[str, Any]) -> int:
         _option(argv, "source", params.get("source"))
     if action != "train":
         _option(argv, "checkpoint", params.get("checkpoint") or params.get("model"))
-    suffix = "model.onnx" if action == "export" else "metrics.json" if action == "evaluate" else "predictions.csv"
+    export_format = str(params.get("format", "onnx")).lower()
+    export_suffix = "model.engine" if export_format in {"tensorrt", "trt", "engine"} else "model.onnx"
+    suffix = export_suffix if action == "export" else "metrics.json" if action == "evaluate" else "predictions.csv"
     _option(argv, "output", output if action == "train" else output / suffix)
     _options(argv, params, ("arch", "epochs", "batch", "imgsz", "clip_len", "width", "hidden", "dropout", "lr",
                             "weight_decay", "label_smoothing", "val_fraction", "seed", "workers", "device", "opset",
-                            *AUGMENTATION_OPTIONS))
+                            "format", "workspace", *AUGMENTATION_OPTIONS))
+    if action == "export" and "half" in params:
+        _option(argv, "half", params["half"], boolean_optional=True)
     return video_main(argv)
 
 
-@register_task("vlm", actions=("tune", "train", "merge"), default_architecture="hf-lora",
+@register_task("vlm", actions=("tune", "train", "merge", "export"), default_architecture="hf-lora",
                description="Multimodal image-text PEFT/LoRA tuning.")
 def run_vlm(action: str, params: dict[str, Any]) -> int:
+    if action == "export":
+        from automation.vlm_export import main as vlm_export_main
+
+        export_format = str(params.get("format", "onnx")).lower()
+        suffix = "model.engine" if export_format in {"tensorrt", "trt", "engine"} else "model.onnx"
+        output = _output(params, "vlm_export") / suffix
+        argv: list[str] = []
+        _option(argv, "model", params.get("model"))
+        _option(argv, "adapter", params.get("adapter") or params.get("checkpoint"))
+        _option(argv, "output", output)
+        _option(argv, "format", "tensorrt" if export_format in {"tensorrt", "trt", "engine"} else "onnx")
+        _options(argv, params, ("device", "dtype", "sample_image", "prompt", "image_size", "max_length",
+                                "opset", "workspace"))
+        for option in ("half", "trust_remote_code"):
+            if option in params:
+                _option(argv, option, params[option], boolean_optional=True)
+        return vlm_export_main(argv)
+
     from automation.vlm_tune import main as vlm_main
     action = "tune" if action == "train" else action
     arch = str(params.get("arch", "hf-lora")).lower().replace("_", "-")
