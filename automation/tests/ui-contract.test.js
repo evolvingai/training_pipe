@@ -81,6 +81,7 @@ test('Data is a COCO/custom Dataset Explorer with shared visualizations', () => 
   assert.match(app, /Kinetics-400/);
   assert.match(app, /COCO Captions/);
   assert.match(app, /LLaVA-Instruct-150K/);
+  assert.ok(app.indexOf('Dataset snapshot') < app.indexOf('Recommended progression'));
   assert.doesNotMatch(app, /Golden Dataset/i);
 });
 
