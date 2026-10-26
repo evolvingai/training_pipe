@@ -36,6 +36,25 @@ const DATASET_RECOMMENDATIONS = {
   ],
 };
 
+const KNOWN_DATASETS = {
+  detection: [
+    { name: 'COCO 2017 validation', format: 'COCO detector TOML', source: '/data2/datasets/coco2017/detection_val.toml', machine: 'A100 VM' },
+    { name: 'Detector smoke dataset', format: 'YOLO TOML', source: '/private/tmp/training_pipe_xai_smoke_20261022_01/runs/vm_smoke_matrix_history/detection/data/dataset.toml', machine: 'local-cpu', agentId: 'local-cpu' },
+  ],
+  classification: [
+    { name: 'COCO 2017 multi-label', format: 'COCO root', source: '/data2/datasets/coco2017', machine: 'A100 VM' },
+  ],
+  video: [],
+  vlm: [],
+};
+
+const RUNNABLE_PROFILE_FORMATS = {
+  detection: new Set(['yolo']),
+  classification: new Set(['class-folders']),
+  video: new Set(['video-folders']),
+  vlm: new Set(['vlm-jsonl']),
+};
+
 async function api(path, options = {}) {
   const request = () => fetch(`/api${path}`, {
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
@@ -231,6 +250,56 @@ function field(name, label, { value = '', placeholder = '', type = 'text', requi
   return `<label class="field"><span>${label}</span><input ${attributes} /></label>`;
 }
 
+function datasetCatalog(family, profiles = []) {
+  const allowed = RUNNABLE_PROFILE_FORMATS[family] || new Set();
+  const profiled = profiles.filter((profile) => allowed.has(profile.format)).map((profile) => ({
+    name: profile.name, format: profile.format, source: profile.source,
+    machine: profile.agentId || 'profiled machine', agentId: profile.agentId || '',
+  }));
+  const unique = new Map();
+  for (const item of [...(KNOWN_DATASETS[family] || []), ...profiled]) {
+    if (item.source && !unique.has(item.source)) unique.set(item.source, item);
+  }
+  return [...unique.values()];
+}
+
+function datasetField(family, label, profiles, { placeholder = '', required = true } = {}) {
+  const choices = datasetCatalog(family, profiles);
+  return `<div class="dataset-run-picker">
+    <label class="field"><span>Available dataset or new</span><select class="dataset-choice">
+      <option value="" selected disabled>Choose an available dataset…</option>
+      ${choices.map((item) => `<option value="${esc(item.source)}" data-agent="${esc(item.agentId || '')}">${esc(item.name)} · ${esc(item.format)} · ${esc(item.machine)}</option>`).join('')}
+      <option value="__new__">New ${esc(label)}…</option>
+    </select></label>
+    ${field('data', label, { placeholder, required })}
+    <p class="muted dataset-choice-note">Selecting an existing dataset fills its path. Choose “New ${esc(label)}…” to enter another path.</p>
+  </div>`;
+}
+
+function bindDatasetPickers() {
+  $$('.dataset-run-picker').forEach((picker) => {
+    const select = $('.dataset-choice', picker);
+    const input = $('input[name="data"]', picker);
+    if (!select || !input) return;
+    select.addEventListener('change', () => {
+      if (select.value === '__new__') {
+        input.value = '';
+        input.readOnly = false;
+        input.focus();
+        return;
+      }
+      input.value = select.value;
+      input.readOnly = true;
+      const agentId = select.selectedOptions[0]?.dataset.agent;
+      const machine = $('#job-machine');
+      if (agentId && machine?.querySelector(`option[value="${CSS.escape(agentId)}"]`)) {
+        machine.value = agentId;
+        machine.dispatchEvent(new Event('change'));
+      }
+    });
+  });
+}
+
 function architecturePlugins(family = currentFamily()) {
   const task = FAMILIES[family]?.task;
   return (CONFIG?.registry?.architectures || []).filter((architecture) => architecture.task === task);
@@ -306,7 +375,7 @@ function augmentationFields({ multiSample = true } = {}) {
   </details>`;
 }
 
-function detectionForm(mode) {
+function detectionForm(mode, datasets = []) {
   const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
   const names = {
     train: `detect_train_${stamp}`, finetune: `detect_finetune_${stamp}`,
@@ -321,7 +390,7 @@ function detectionForm(mode) {
   };
   let body = '';
   if (mode === 'train') body = `<div class="card"><h3>Dataset and model</h3>
-    ${field('data', 'Dataset TOML', { placeholder: '/data/dataset.toml', required: true })}
+    ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}
     ${architectureField('model', 'Model architecture', { value: 'trainer-n' })}</div>
     <div class="card"><h3>Training parameters</h3><div class="adv-grid">
       ${field('epochs', 'Epochs', { value: '100', type: 'number', min: 1 })}
@@ -330,7 +399,7 @@ function detectionForm(mode) {
     </div></div>`;
   if (mode === 'finetune') body = `<div class="card"><h3>Checkpoint and dataset</h3>
     ${field('checkpoint', 'Source checkpoint', { placeholder: '/runs/base/weights/best.pt', required: true })}
-    ${field('data', 'Dataset TOML', { placeholder: '/data/dataset.toml', required: true })}</div>
+    ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}</div>
     <div class="card"><h3>Finetuning parameters</h3><div class="adv-grid">
       ${field('epochs', 'Epochs', { value: '30', type: 'number', min: 1 })}
       ${field('batch', 'Batch size', { value: '2', type: 'number', min: 1 })}
@@ -339,14 +408,14 @@ function detectionForm(mode) {
     </div></div>`;
   if (mode === 'evaluate') body = `<div class="card"><h3>Evaluation inputs</h3>
     ${field('checkpoint', 'Checkpoint', { placeholder: '/runs/experiment/weights/best.pt', required: true })}
-    ${field('data', 'Dataset TOML', { placeholder: '/data/dataset.toml', required: true })}
-    <p class="muted">This recipe runs validation first, then writes the HTML/CSV report into the named run folder.</p></div>`;
+    ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}
+    <p class="muted">This recipe runs validation first, then writes the Markdown/CSV report into the named run folder.</p></div>`;
   if (mode === 'predict') body = `<div class="card"><h3>Inference inputs</h3>
     ${field('checkpoint', 'Checkpoint', { placeholder: '/runs/experiment/weights/best.pt', required: true })}
     ${field('source', 'Images or directory', { placeholder: '/data/images', required: true })}
     ${field('conf', 'Confidence threshold', { value: '0.25', type: 'number', min: 0, step: 0.01 })}</div>`;
   if (mode === 'tune') body = `<div class="card"><h3>Tuning inputs</h3>
-    ${field('data', 'Dataset TOML', { placeholder: '/data/dataset.toml', required: true })}
+    ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}
     ${architectureField('model', 'Model architecture', { value: 'trainer-n' })}
     ${field('iterations', 'Tune iterations', { value: '30', type: 'number', min: 1 })}</div>`;
   return `<h2 class="page-title">${headers[mode][0]}</h2><p class="page-sub">${headers[mode][1]}</p>
@@ -355,7 +424,7 @@ function detectionForm(mode) {
     </form>`;
 }
 
-function classificationForm(mode) {
+function classificationForm(mode, datasets = []) {
   const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
   const names = {
     train: `classifier_train_${stamp}`, finetune: `classifier_finetune_${stamp}`,
@@ -371,7 +440,7 @@ function classificationForm(mode) {
   };
   let body = '';
   if (mode === 'train') body = `<div class="card"><h3>Classification dataset</h3>
-    ${field('data', 'Dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
+    ${datasetField('classification', 'Dataset root or COCO annotations', datasets, { placeholder: '/data/coco' })}
     ${architectureField('arch', 'Architecture plugin', { value: 'convnext-tiny' })}
     <div class="pipeline"><code>annotations/instances_*.json + train2017/</code><span>or</span><code>train/class_name/*.jpg</code></div>
     <p class="muted">COCO is detected automatically and trained as multi-label category presence. Class folders retain single-label softmax training.</p></div>
@@ -384,7 +453,7 @@ function classificationForm(mode) {
     </div>${field('resume', 'Resume checkpoint (optional)', { placeholder: '/runs/classifier/weights/last.pt' })}</div>`;
   if (mode === 'finetune') body = `<div class="card"><h3>Checkpoint and dataset</h3>
     ${field('checkpoint', 'Source checkpoint', { placeholder: '/runs/classifier/weights/best.pt', required: true })}
-    ${field('data', 'Dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
+    ${datasetField('classification', 'Dataset root or COCO annotations', datasets, { placeholder: '/data/coco' })}
     ${architectureField('arch', 'Architecture override (optional)', { optional: true })}</div>
     <div class="card"><h3>Finetuning parameters</h3><div class="adv-grid">
       ${field('epochs', 'Epochs', { value: '20', type: 'number', min: 1 })}
@@ -395,7 +464,7 @@ function classificationForm(mode) {
     </div></div>`;
   if (mode === 'evaluate') body = `<div class="card"><h3>Evaluation inputs</h3>
     ${field('checkpoint', 'Classifier checkpoint', { placeholder: '/runs/classifier/weights/best.pt', required: true })}
-    ${field('data', 'Labelled dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
+    ${datasetField('classification', 'Labelled dataset root or COCO annotations', datasets, { placeholder: '/data/coco' })}
     ${field('batch', 'Batch size', { value: '32', type: 'number', min: 1 })}
     <p class="muted">Produces metrics JSON, per-image CSV, optimized class thresholds, an HTML report, and a confusion matrix for single-label runs.</p></div>`;
   if (mode === 'predict') body = `<div class="card"><h3>Prediction inputs</h3>
@@ -417,7 +486,7 @@ function classificationForm(mode) {
       ${field('intensity', 'Overlay intensity', { value: '0.72', type: 'number', min: 0.05, step: 0.05 })}
     </div><p class="muted">Red supports the selected class; blue opposes it. The result keeps the prediction and highest-energy feature channels together for each selected sample.</p></div>`;
   if (mode === 'tune') body = `<div class="card"><h3>Tuning inputs</h3>
-    ${field('data', 'Dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
+    ${datasetField('classification', 'Dataset root or COCO annotations', datasets, { placeholder: '/data/coco' })}
     ${architectureField('arch', 'Architecture plugin', { value: 'convnext-tiny' })}
     <div class="adv-grid">
       ${field('iterations', 'Trials', { value: '10', type: 'number', min: 1 })}
@@ -431,7 +500,7 @@ function classificationForm(mode) {
     </form>`;
 }
 
-function videoForm(mode) {
+function videoForm(mode, datasets = []) {
   const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
   const names = {
     train: `video_train_${stamp}`, evaluate: `video_eval_${stamp}`, predict: `video_predict_${stamp}`,
@@ -443,7 +512,7 @@ function videoForm(mode) {
   };
   let body = '';
   if (mode === 'train') body = `<div class="card"><h3>Video dataset</h3>
-    ${field('data', 'Dataset root', { placeholder: '/data/actions', required: true })}
+    ${datasetField('video', 'Dataset root', datasets, { placeholder: '/data/actions' })}
     ${architectureField('arch', 'Architecture plugin', { value: 'r2plus1d-tiny' })}
     <div class="pipeline"><code>train/action_name/*.mp4</code><span>or</span><code>action_name/*.mp4</code></div>
     <p class="muted">Supports MP4, AVI, MOV, MKV, M4V, and WebM. Compact datasets are split deterministically per action.</p></div>
@@ -455,7 +524,7 @@ function videoForm(mode) {
     </div><p class="muted">The compact frame encoder + GRU baseline runs on CPU. Use CUDA for larger clips and faster iteration.</p></div>`;
   if (mode === 'evaluate') body = `<div class="card"><h3>Evaluation inputs</h3>
     ${field('checkpoint', 'Video checkpoint', { placeholder: '/runs/video_action/best.pt', required: true })}
-    ${field('data', 'Labelled video dataset', { placeholder: '/data/actions', required: true })}
+    ${datasetField('video', 'Labelled video dataset', datasets, { placeholder: '/data/actions' })}
     ${field('batch', 'Batch size', { value: '4', type: 'number', min: 1 })}</div>`;
   if (mode === 'predict') body = `<div class="card"><h3>Prediction inputs</h3>
     ${field('checkpoint', 'Video checkpoint', { placeholder: '/runs/video_action/best.pt', required: true })}
@@ -467,7 +536,7 @@ function videoForm(mode) {
     </form>`;
 }
 
-function vlmForm(mode) {
+function vlmForm(mode, datasets = []) {
   const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
   if (mode === 'evaluate') {
     return `<h2 class="page-title">Evaluate vision-language model</h2><p class="page-sub">Measure teacher-forced loss, perplexity, and answer-token accuracy on one explicit image-text dataset.</p>
@@ -476,7 +545,7 @@ function vlmForm(mode) {
         <div class="card"><h3>Evaluation inputs</h3>
           ${field('model', 'Base model', { placeholder: 'organization/model-name', required: true })}
           ${field('adapter', 'LoRA adapter directory (optional)', { placeholder: '/runs/vlm_lora/adapter' })}
-          ${field('data', 'Evaluation JSONL', { placeholder: '/data/vlm/validation.jsonl', required: true })}
+          ${datasetField('vlm', 'Evaluation JSONL', datasets, { placeholder: '/data/vlm/validation.jsonl' })}
           <div class="adv-grid">
             ${field('batch', 'Batch size', { value: '1', type: 'number', min: 1 })}
             ${field('maxLength', 'Max tokens', { value: '1024', type: 'number', min: 32 })}
@@ -495,7 +564,7 @@ function vlmForm(mode) {
       <div class="card"><h3>Model and dataset</h3>
         ${architectureField('arch', 'Architecture plugin', { value: 'hf-lora' })}
         ${field('model', 'Hugging Face model', { placeholder: 'organization/model-name', required: true })}
-        ${field('data', 'Training JSONL', { placeholder: '/data/vlm/train.jsonl', required: true })}
+        ${datasetField('vlm', 'Training JSONL', datasets, { placeholder: '/data/vlm/train.jsonl' })}
         <div class="pipeline"><code>{"image":"images/1.jpg","prompt":"What is shown?","answer":"..."}</code></div>
       </div>
       <div class="card"><h3>LoRA tuning parameters</h3><div class="adv-grid">
@@ -547,6 +616,7 @@ function commandText(command) {
 function bindRunForm() {
   const form = $('#run-form');
   if (!form) return;
+  bindDatasetPickers();
   $('#preview-btn')?.addEventListener('click', async () => {
     try {
       const payload = formPayload(form);
@@ -643,8 +713,11 @@ function bindDiscoveredRuns() {
 }
 
 async function renderNew(main, initialMode = '') {
-  const { agents } = await api('/agents');
   const family = currentFamily();
+  const [{ agents }, { profiles }] = await Promise.all([
+    api('/agents'),
+    api(`/dataset-profiles?family=${encodeURIComponent(family)}&limit=100`).catch(() => ({ profiles: [] })),
+  ]);
   const modes = family === 'detection'
     ? [['train', 'Train'], ['finetune', 'Finetune'], ['evaluate', 'Evaluate'], ['predict', 'Predict'], ['tune', 'Tune']]
     : family === 'classification'
@@ -657,9 +730,9 @@ async function renderNew(main, initialMode = '') {
     <div id="mode-form"></div>`;
   bindMachinePicker(agents);
   const show = (mode) => {
-    $('#mode-form').innerHTML = family === 'detection' ? detectionForm(mode)
-      : family === 'classification' ? classificationForm(mode)
-        : family === 'video' ? videoForm(mode) : vlmForm(mode);
+    $('#mode-form').innerHTML = family === 'detection' ? detectionForm(mode, profiles)
+      : family === 'classification' ? classificationForm(mode, profiles)
+        : family === 'video' ? videoForm(mode, profiles) : vlmForm(mode, profiles);
     bindRunForm();
   };
   show(selectedMode);

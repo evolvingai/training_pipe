@@ -42,6 +42,11 @@ test('all four Trainer families expose independent workflows', () => {
   assert.match(app, /External augmentation TOML/);
   assert.match(app, /Mosaic probability/);
   assert.match(app, /Motion blur probability/);
+  assert.match(app, /Available dataset or new/);
+  assert.match(app, /New \$\{esc\(label\)\}/);
+  assert.match(app, /COCO 2017 validation/);
+  assert.match(app, /detection_val\.toml/);
+  assert.match(app, /bindDatasetPickers/);
 });
 
 test('every family uses the structured evaluation workspace', () => {

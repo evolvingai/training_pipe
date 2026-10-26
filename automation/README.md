@@ -56,6 +56,10 @@ the same plugin registry.
   JSONL are profiled on the selected VM and shown through the same sample/split,
   class-distribution, missing-label, invalid-record, and quality visualizations.
   Raw dataset files are not copied into or exposed by the control plane.
+- New Run forms expose runnable datasets through an **Available dataset or
+  new** selector. Selecting a registered/profiled dataset fills and locks its
+  worker-local path; selecting **New dataset…** enables a new TOML, root, or
+  JSONL path appropriate to that model family.
 
 The control plane creates fixed argument arrays. The agent uses `spawn()` with
 `shell: false`; job parameters are never evaluated by a shell.
