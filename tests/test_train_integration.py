@@ -13,13 +13,13 @@ def test_train_val_predict_cycle(tiny_dataset, clean_runs):
     result = model.train(str(tiny_dataset), epochs=2, project=str(clean_runs), name="t", **COMMON)
     assert "mAP50" in result
     run_dir = clean_runs / "t"
-    assert (run_dir / "best.pt").exists()
-    assert (run_dir / "last.pt").exists()
-    assert (run_dir / "config.toml").exists()
-    assert (run_dir / "results.csv").exists()
+    assert (run_dir / "weights" / "best.pt").exists()
+    assert (run_dir / "weights" / "last.pt").exists()
+    assert (run_dir / "cfg" / "args.yaml").exists()
+    assert (run_dir / "logs" / "results.csv").exists()
 
     # checkpoint reload + val
-    model2 = Model(str(run_dir / "best.pt"))
+    model2 = Model(str(run_dir / "weights" / "best.pt"))
     assert model2.net.nc == 2
     val = model2.val(str(tiny_dataset), **COMMON)
     assert 0.0 <= val["mAP50"] <= 1.0
@@ -34,8 +34,8 @@ def test_train_val_predict_cycle(tiny_dataset, clean_runs):
 
     # resume continues from saved epoch
     result2 = model2.train(str(tiny_dataset), epochs=3, project=str(clean_runs), name="t",
-                           resume=str(run_dir / "last.pt"), **COMMON)
-    ckpt = torch.load(run_dir / "last.pt", map_location="cpu", weights_only=False)
+                           resume=str(run_dir / "weights" / "last.pt"), **COMMON)
+    ckpt = torch.load(run_dir / "weights" / "last.pt", map_location="cpu", weights_only=False)
     assert ckpt["epoch"] == 2  # 0-indexed third epoch
 
 
@@ -55,7 +55,7 @@ def test_threshold_tuning_and_report(tiny_dataset, clean_runs):
     report = generate_report(clean_runs / "r", result, parsed["names"],
                              load_config({"data": str(tiny_dataset)}), thresholds=thr)
     text = report.read_text()
-    assert "<html" in text and "Per-class AP" in text and "red" in text
+    assert "# Evaluation Report" in text and "Per-class Metrics" in text and "red" in text
 
 
 def test_finetune_nc_remap(tiny_dataset, clean_runs):

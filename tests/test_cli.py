@@ -34,7 +34,7 @@ def test_cli_train_and_val(tiny_dataset, tmp_path):
                  "imgsz=96", "batch=4", "workers=0", "device=cpu", "amp=false",
                  "mosaic=0.0", f"project={tmp_path}", "name=cli", "warmup_epochs=0.5"])
     assert code == 0
-    best = tmp_path / "cli" / "best.pt"
+    best = tmp_path / "cli" / "weights" / "best.pt"
     assert best.exists()
     assert main(["val", f"model={best}", f"data={tiny_dataset}", "imgsz=96",
                  "batch=4", "workers=0", "device=cpu"]) == 0

@@ -21,13 +21,13 @@ usage: trainer <command> [key=value ...]
 
 commands:
   train        train a detector            trainer train data=ds.toml model=trainer-n epochs=100
-  val          evaluate a checkpoint       trainer val model=runs/exp/best.pt data=ds.toml
-  predict      run inference               trainer predict model=best.pt source=images/ conf=0.4
-  finetune     transfer-learn              trainer finetune model=best.pt data=new.toml freeze=10
-  export       export onnx / tensorrt      trainer export model=best.pt format=onnx
+  val          evaluate a checkpoint       trainer val model=runs/exp/weights/best.pt data=ds.toml
+  predict      run inference               trainer predict model=weights/best.pt source=images/ conf=0.4
+  finetune     transfer-learn              trainer finetune model=weights/best.pt data=new.toml freeze=10
+  export       export onnx / tensorrt      trainer export model=weights/best.pt format=onnx
   tune         evolve hyperparameters      trainer tune data=ds.toml tune_iterations=30
-  tune-thresh  per-class conf thresholds   trainer tune-thresh model=best.pt data=ds.toml
-  report       html evaluation report      trainer report model=best.pt data=ds.toml
+  tune-thresh  per-class conf thresholds   trainer tune-thresh model=weights/best.pt data=ds.toml
+  report       markdown evaluation report  trainer report model=weights/best.pt data=ds.toml
   viz-augment  visualize augmentations     trainer viz-augment data=ds.toml n=16
   bench-data   dataloader throughput       trainer bench-data data=ds.toml
   version      print version

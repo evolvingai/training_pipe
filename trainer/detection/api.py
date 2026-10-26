@@ -16,7 +16,7 @@ class Model:
     """
     Usage:
         model = Model("trainer-n")            # fresh architecture
-        model = Model("runs/exp/best.pt")     # trained checkpoint
+        model = Model("runs/exp/weights/best.pt")  # trained checkpoint
         model.train(data="dataset.toml", epochs=100)
         model.val(data="dataset.toml")
         results = model.predict("images/")

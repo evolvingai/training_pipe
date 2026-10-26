@@ -17,7 +17,7 @@ Directory layout produced:
             val_batch{n}_labels.jpg   (written by validator.py)
             val_batch{n}_pred.jpg     (written by validator.py)
         reports/
-            report.html
+            report.md
 """
 
 from __future__ import annotations
