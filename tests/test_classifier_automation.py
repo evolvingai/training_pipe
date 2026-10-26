@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import torch
 
-from trainer.classification.data import ImageDataset, TinyClassifier, discover_training
+from trainer.classification.data import ImageDataset, TinyClassifier, classification_mode, discover_training
 from trainer.cli import main
 
 
@@ -16,6 +16,34 @@ def _dataset(root: Path) -> None:
         for index in range(4):
             image = np.full((32, 32, 3), color + index, dtype=np.uint8)
             assert cv2.imwrite(str(folder / f"{index}.png"), image)
+
+
+def _coco_multilabel_dataset(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    images = []
+    annotations = []
+    labels = ((1, 2), (1,), (2,), (1, 2), (1,), (2,))
+    annotation_id = 1
+    for index, image_labels in enumerate(labels, start=1):
+        name = f"{index:012d}.jpg"
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        image[:, :16] = (30 + index, 30 + index, 220 if 1 in image_labels else 30)
+        image[:, 16:] = (220 if 2 in image_labels else 30, 30 + index, 30 + index)
+        assert cv2.imwrite(str(root / name), image)
+        images.append({"id": index, "file_name": name})
+        for category_id in image_labels:
+            annotations.append({
+                "id": annotation_id, "image_id": index, "category_id": category_id,
+                "bbox": [0, 0, 16, 32], "area": 512, "iscrowd": 0,
+            })
+            annotation_id += 1
+    annotation_file = root / "instances_smoke.json"
+    annotation_file.write_text(json.dumps({
+        "images": images,
+        "categories": [{"id": 1, "name": "red-object"}, {"id": 2, "name": "blue-object"}],
+        "annotations": annotations,
+    }), encoding="utf8")
+    return annotation_file
 
 
 def test_compact_classifier_dataset_is_split_per_class(tmp_path):
@@ -60,7 +88,7 @@ def test_classifier_one_epoch_cpu_smoke(tmp_path):
     ]) == 0
     assert (output / "best.pt").is_file()
     checkpoint = torch.load(output / "best.pt", map_location="cpu", weights_only=False)
-    assert checkpoint["format"] == "trainer-image-classifier-v3"
+    assert checkpoint["format"] == "trainer-image-classifier-v4"
     assert checkpoint["arch"] == "convnext-tiny"
     assert checkpoint["classes"] == ["dark", "light"]
     assert (output / "weights" / "best.pt").is_file()
@@ -82,6 +110,73 @@ def test_classifier_one_epoch_cpu_smoke(tmp_path):
     assert (xai_output / manifest["images"][0]["activations"]).is_file()
     assert (xai_output / manifest["images"][0]["dossier"]).is_file()
     assert (xai_output / "reports" / "xai.html").is_file()
+
+
+def test_coco_multilabel_classifier_cpu_smoke(tmp_path):
+    data = _coco_multilabel_dataset(tmp_path / "coco")
+    train_samples, val_samples, names = discover_training(data, val_fraction=0.33, seed=3)
+    assert names == ["red-object", "blue-object"]
+    assert classification_mode(train_samples + val_samples) == "multi-label"
+    dataset = ImageDataset(train_samples, 32, augment=False, num_classes=len(names))
+    _, target, _ = dataset[0]
+    assert isinstance(target, torch.Tensor)
+    assert target.shape == (2,)
+    augmented = ImageDataset(train_samples, 32, augment=True, num_classes=len(names), seed=3, augmentation={
+        "mosaic": 1.0, "mosaic9": 0.0, "mixup": 1.0, "copy_paste": 1.0,
+        "degrees": 5.0, "translate": 0.05, "scale": 0.1, "fliplr": 1.0,
+    })
+    _, augmented_target, _ = augmented[0]
+    assert augmented_target.shape == (2,)
+    assert ((augmented_target >= 0) & (augmented_target <= 1)).all()
+
+    output = tmp_path / "multilabel-run"
+    assert main([
+        "train", "task=classification", "arch=convnext-tiny", f"data={data}", f"output={output}",
+        "epochs=1", "batch=2", "imgsz=32", "width=4", "workers=0", "device=cpu",
+    ]) == 0
+    checkpoint = torch.load(output / "weights" / "best.pt", map_location="cpu", weights_only=False)
+    assert checkpoint["classification_mode"] == "multi-label"
+    assert checkpoint["activation"] == "sigmoid"
+    assert checkpoint["metrics"]["classification_mode"] == "multi-label"
+    assert "map" in checkpoint["metrics"]
+
+    evaluation = tmp_path / "multilabel-eval"
+    assert main([
+        "evaluate", "task=classification", f"data={data}",
+        f"checkpoint={output / 'weights' / 'best.pt'}", f"output={evaluation}",
+        "batch=2", "device=cpu",
+    ]) == 0
+    metrics = json.loads((evaluation / "metrics.json").read_text())
+    assert metrics["classification_mode"] == "multi-label"
+    assert metrics["samples"] == 6
+    assert metrics["confusion_matrix"] == []
+
+    assert main([
+        "tune-thresh", "task=classification", f"data={data}",
+        f"checkpoint={output / 'weights' / 'best.pt'}", f"output={evaluation}",
+        "batch=2", "steps=8", "device=cpu",
+    ]) == 0
+    thresholds = evaluation / "thresholds.json"
+    assert set(json.loads(thresholds.read_text())["thresholds"]) == set(names)
+
+    predictions = tmp_path / "multilabel-predict"
+    assert main([
+        "predict", "task=classification", f"source={data.parent}",
+        f"checkpoint={output / 'weights' / 'best.pt'}", f"thresholds={thresholds}",
+        f"output={predictions}", "batch=2", "topk=2", "device=cpu",
+    ]) == 0
+    rows = (predictions / "predictions.csv").read_text()
+    assert "classes" in rows and "red-object" in rows
+
+    xai_output = tmp_path / "multilabel-xai"
+    assert main([
+        "xai", "task=classification", f"source={data.parent / '000000000001.jpg'}",
+        f"checkpoint={output / 'weights' / 'best.pt'}", f"output={xai_output}",
+        "max_images=1", "activation_channels=2", "device=cpu",
+    ]) == 0
+    manifest = json.loads((xai_output / "xai" / "manifest.json").read_text())
+    assert manifest["classification_mode"] == "multi-label"
+    assert "predicted_labels" in manifest["images"][0]
 
 
 def test_classifier_matches_detector_lifecycle_on_cpu(tmp_path):

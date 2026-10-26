@@ -6,7 +6,7 @@ const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), '
 const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
 test('UI keeps the Trainer shell and explicit family switch', () => {
-  for (const section of ['Dashboard', 'New Run', 'Export', 'Models', 'xAI', 'Data', 'History']) {
+  for (const section of ['Dashboard', 'New Run', 'Evaluations', 'Export', 'Models', 'xAI', 'Data', 'History']) {
     assert.match(html, new RegExp(`>${section}<`));
   }
   assert.match(html, /data-family="detection"/);
@@ -28,6 +28,7 @@ test('all four Trainer families expose independent workflows', () => {
   assert.match(app, /Channels per stage/);
   assert.match(app, /data-type="video_\$\{mode\}"/);
   assert.match(app, /data-type="vlm_tune"/);
+  assert.match(app, /data-type="vlm_evaluate"/);
   assert.match(app, /data-job-type="vlm_merge"/);
   assert.match(app, /data-type="vlm_export"/);
   assert.match(app, /Export ONNX/);
@@ -43,12 +44,44 @@ test('all four Trainer families expose independent workflows', () => {
   assert.match(app, /Motion blur probability/);
 });
 
+test('every family uses the structured evaluation workspace', () => {
+  assert.match(app, /renderEvaluations/);
+  assert.match(app, /Checkpoint leaderboard/);
+  assert.match(app, /same dataset and split/i);
+  assert.match(app, /Per-class metrics/);
+  assert.match(app, /Confusion matrix/);
+  assert.match(app, /VLM evaluations/);
+  assert.match(app, /#\/new\/evaluate/);
+  assert.doesNotMatch(app, /Open evaluation artifact/);
+});
+
 test('compute targets visibly distinguish GPU and CPU-only machines', () => {
   assert.match(app, /computeKind/);
   assert.match(app, /CPU-only/);
   assert.match(app, /compute-kind/);
   assert.match(app, /machineOptionLabel/);
   assert.match(app, /Compute targets/);
+});
+
+test('Data is a COCO/custom Dataset Explorer with shared visualizations', () => {
+  assert.match(app, /Dataset Explorer/);
+  assert.match(app, /COCO annotation JSON, COCO root, or custom YOLO TOML/);
+  assert.match(app, /Class distribution/);
+  assert.match(app, /Split composition/);
+  assert.match(app, /Bounding-box sizes/);
+  assert.match(app, /golden-source-grid/);
+  assert.match(app, /golden-head-row/);
+  assert.match(app, /golden-level-bar/);
+  assert.match(app, /dataset-distribution-split/);
+  assert.match(app, /view === 'data'/);
+  assert.match(app, /data-type="\$\{profileType\}"/);
+  assert.match(app, /\/dataset-profiles\?family=/);
+  assert.match(app, /COCO 2017 Instances/);
+  assert.match(app, /UCF101/);
+  assert.match(app, /Kinetics-400/);
+  assert.match(app, /COCO Captions/);
+  assert.match(app, /LLaVA-Instruct-150K/);
+  assert.doesNotMatch(app, /Golden Dataset/i);
 });
 
 test('history combines queued jobs with runs discovered on trainer machines', () => {

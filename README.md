@@ -16,7 +16,7 @@ the identity of the framework.
 | Detection | yes | yes + report | yes | ONNX / TensorRT |
 | Image classification | yes + resume/finetune/tune | yes + thresholds/report | yes + top-k/rejection/xAI | ONNX / TensorRT + class contract |
 | Video/action classification | yes | yes | yes | ONNX / TensorRT + clip contract |
-| VLM | PEFT LoRA | training metrics | — | ONNX / TensorRT forward graph, adapter, or merged model |
+| VLM | PEFT LoRA | loss + perplexity + answer-token accuracy | — | ONNX / TensorRT forward graph, adapter, or merged model |
 
 Every family now goes through the same task/architecture registry:
 
@@ -25,6 +25,7 @@ trainer train task=detection arch=trainer-n data=dataset.toml
 trainer train task=classification arch=convnext-tiny data=/data/species
 trainer train task=video arch=r2plus1d-tiny data=/data/actions clip_len=8
 trainer tune task=vlm arch=hf-lora model=org/model data=/data/vlm/train.jsonl
+trainer evaluate task=vlm arch=hf-lora model=org/model adapter=/runs/vlm/adapter data=/data/vlm/validation.jsonl
 ```
 
 Classification has the detector lifecycle rather than a reduced side script:
@@ -232,3 +233,9 @@ The web layer also exposes the live architecture-plugin registry, interactive
 model-flow diagrams, and a sample-level xAI view. The xAI product contract is a
 model result—not a filesystem browser—so manifests, metrics, paths, and generic
 run artifacts are not exposed there.
+Its Dataset Explorer profiles either COCO or the active family’s custom dataset
+on the selected worker, then presents consistent split, class-balance, box-size,
+and data-quality visualizations without copying the raw dataset to the UI. The
+image classifier can use COCO instances as image-level multi-label targets, so
+one scene may train several simultaneous categories while detection keeps the
+original boxes.

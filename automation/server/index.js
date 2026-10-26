@@ -7,6 +7,8 @@ import { clearSessionCookie, makeSession, sessionCookie, sessionUser, validAgent
 import { loadArchitectureCatalog } from './architecture-registry.js';
 import { config } from './config.js';
 import { evidenceSyncLimits, saveSyncedEvidence } from './evidence.js';
+import { datasetProfileFromJob, sanitizeDatasetProfile } from './dataset-profiles.js';
+import { evaluationFromJob, sanitizeEvaluationRecord } from './evaluations.js';
 import { makePowerDriver } from './power.js';
 import { buildRecipe, recipeCatalog } from './recipes.js';
 import { discoverRuns } from './runs.js';
@@ -187,6 +189,26 @@ async function api(req, res, url) {
     ].sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0)).slice(0, limit);
     return send(res, 200, { root: config.vmDefaults.runsDir, runs });
   }
+  if (req.method === 'GET' && pathname === '/api/evaluations') {
+    const family = String(url.searchParams.get('family') || '');
+    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '100', 10), 500);
+    const evaluations = (await store.listJobs(1000))
+      .map((job) => job.evaluation || evaluationFromJob(job))
+      .filter((record) => record && (!family || record.family === family))
+      .sort((left, right) => Number(right.endedAt || 0) - Number(left.endedAt || 0))
+      .slice(0, limit);
+    return send(res, 200, { evaluations });
+  }
+  if (req.method === 'GET' && pathname === '/api/dataset-profiles') {
+    const family = String(url.searchParams.get('family') || '');
+    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '100', 10), 500);
+    const profiles = (await store.listJobs(1000))
+      .map((job) => job.datasetProfile || datasetProfileFromJob(job))
+      .filter((profile) => profile && (!family || profile.family === family))
+      .sort((left, right) => Number(right.generatedAt || 0) - Number(left.generatedAt || 0))
+      .slice(0, limit);
+    return send(res, 200, { profiles });
+  }
   if (req.method === 'POST' && pathname === '/api/preview') {
     const input = await body(req);
     try {
@@ -342,6 +364,16 @@ async function agentApi(req, res, url) {
     }
     if (input.error != null) patch.error = String(input.error).slice(0, 4000);
     if (Array.isArray(input.artifacts)) patch.artifacts = input.artifacts.map(String).slice(0, 100);
+    if (input.evaluation) {
+      const evaluation = sanitizeEvaluationRecord(input.evaluation);
+      if (!evaluation) throw new Error('invalid evaluation record');
+      patch.evaluation = evaluation;
+    }
+    if (input.datasetProfile) {
+      const datasetProfile = sanitizeDatasetProfile(input.datasetProfile);
+      if (!datasetProfile) throw new Error('invalid dataset profile');
+      patch.datasetProfile = datasetProfile;
+    }
     const updated = await store.updateJob(updateId, patch);
     let shutdown = false;
     try { shutdown = await maybeAutoShutdown(patch.status); } catch (reason) {

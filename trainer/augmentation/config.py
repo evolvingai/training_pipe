@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import tomllib
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 from pathlib import Path
 from typing import Any
 

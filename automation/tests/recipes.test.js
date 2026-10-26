@@ -16,6 +16,24 @@ test('CPU detector recipe produces an exact, shell-free command', () => {
   assert.equal(recipe.commands[0].argv.some((part) => part === ';'), false);
 });
 
+test('all model families can profile COCO or custom datasets on a worker', () => {
+  const cases = [
+    ['detect_dataset_profile', 'detection', '/data/coco/annotations/instances_val2017.json'],
+    ['classifier_dataset_profile', 'classification', '/data/species'],
+    ['video_dataset_profile', 'video', '/data/actions'],
+    ['vlm_dataset_profile', 'vlm', '/data/vlm/validation.jsonl'],
+  ];
+  for (const [type, family, data] of cases) {
+    const recipe = buildRecipe(type, { name: `${family}-profile`, data }, defaults);
+    assert.deepEqual(recipe.commands[0].argv.slice(0, 2), ['/venv/bin/python', '/opt/trainer/automation/dataset_profile.py']);
+    assert.ok(recipe.commands[0].argv.includes('--family'));
+    assert.ok(recipe.commands[0].argv.includes(family));
+    assert.ok(recipe.commands[0].argv.includes(data));
+    assert.ok(recipe.commands[0].argv.includes(`/runs/${family}-profile/dataset-profile.json`));
+    assert.deepEqual(recipe.artifacts, [`/runs/${family}-profile`]);
+  }
+});
+
 test('CUDA jobs preserve explicit device and larger defaults', () => {
   const recipe = buildRecipe('detect_train', {
     name: 'gpu', data: '/data/dataset.toml', model: 'trainer-s', device: 'cuda:1',
@@ -104,6 +122,24 @@ test('VLM tuning and merge recipes create portable adapter commands', () => {
   }, defaults);
   assert.ok(merge.commands[0].argv.includes('merge'));
   assert.ok(merge.commands[0].argv.includes('adapter=/runs/caption_lora/adapter'));
+
+  const evaluation = buildRecipe('vlm_evaluate', {
+    name: 'vlm-eval', data: '/data/vlm/validation.jsonl', model: 'org/small-vlm',
+    adapter: '/runs/caption_lora/adapter', maxSamples: 12,
+  }, defaults);
+  assert.ok(evaluation.commands[0].argv.includes('evaluate'));
+  assert.ok(evaluation.commands[0].argv.includes('task=vlm'));
+  assert.ok(evaluation.commands[0].argv.includes('max_samples=12'));
+  assert.deepEqual(evaluation.artifacts, ['/runs/vlm-eval']);
+});
+
+test('detector evaluation writes validation metrics into its evaluation run', () => {
+  const recipe = buildRecipe('detect_evaluate', {
+    name: 'detector-eval', data: '/data/dataset.toml', checkpoint: '/runs/train/weights/best.pt',
+  }, defaults);
+  assert.ok(recipe.commands[0].argv.includes('project=/runs'));
+  assert.ok(recipe.commands[0].argv.includes('name=detector-eval'));
+  assert.ok(recipe.commands[0].argv.includes('exist_ok=true'));
 });
 
 test('detector export uses a deterministic artifact directory', () => {

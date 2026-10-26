@@ -141,6 +141,7 @@ def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterabl
                  preprocess: Callable[[Path], tuple[torch.Tensor, np.ndarray]] | None = None) -> dict[str, Any]:
     """Generate signed class evidence and stage activations for classifier images."""
     names = list(payload["classes"])
+    mode = str(payload.get("classification_mode", "single-label"))
     paths = list(image_paths)[:max_images]
     if not paths:
         raise ValueError("xAI source contains no images")
@@ -176,7 +177,7 @@ def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterabl
             model.zero_grad(set_to_none=True)
             with torch.enable_grad():
                 logits = model(tensor.unsqueeze(0).to(device))
-                probabilities = logits.softmax(1)[0]
+                probabilities = (logits.sigmoid() if mode == "multi-label" else logits.softmax(1))[0]
                 target_index = _target_index(target, names, probabilities)
                 if not captured:
                     raise ValueError("selected classifier feature layers did not produce spatial activations")
@@ -232,6 +233,8 @@ def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterabl
                 "target_score": float(probabilities_cpu[target_index]),
                 "topk": [{"class": names[int(class_index)], "confidence": float(score)}
                          for score, class_index in zip(top_values, top_indices, strict=True)],
+                "predicted_labels": [names[class_index] for class_index, score in enumerate(probabilities_cpu)
+                                     if mode == "multi-label" and float(score) >= 0.5],
                 "input": str(input_path.relative_to(output)),
                 "signed_map": str(signed_path.relative_to(output)),
                 "overlay": str(overlay_path.relative_to(output)),
@@ -247,6 +250,7 @@ def generate_xai(model: nn.Module, payload: dict[str, Any], image_paths: Iterabl
         "created_at": datetime.now(timezone.utc).isoformat(),
         "architecture": str(payload.get("arch", "classifier")),
         "classes": names,
+        "classification_mode": mode,
         "method": "signed Grad-CAM; red supports selected class, blue opposes selected class",
         "images": rows,
     }

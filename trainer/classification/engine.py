@@ -30,6 +30,7 @@ from trainer.classification.data import (
     ImageDataset,
     Sample,
     TinyClassifier,
+    classification_mode,
     discover_evaluation,
     discover_training,
     image_files,
@@ -45,6 +46,7 @@ CHECKPOINT_FORMATS = {
     "trainer-image-classifier-v1",
     "trainer-image-classifier-v2",
     "trainer-image-classifier-v3",
+    "trainer-image-classifier-v4",
 }
 
 
@@ -91,10 +93,30 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     return float(numerator / denominator) if denominator else 0.0
 
 
+def _payload_mode(payload: dict[str, Any]) -> str:
+    return str(payload.get("classification_mode", "single-label"))
+
+
+def _average_precision(actual: np.ndarray, scores: np.ndarray) -> float:
+    positives = int(actual.sum())
+    if positives == 0:
+        return 0.0
+    order = np.argsort(-scores, kind="stable")
+    ranked = actual[order].astype(np.float64)
+    precision = np.cumsum(ranked) / np.arange(1, len(ranked) + 1)
+    return float((precision * ranked).sum() / positives)
+
+
 @torch.inference_mode()
 def evaluate_model(model: nn.Module, loader, device: torch.device, names: list[str],
-                   *, include_probabilities: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                   *, include_probabilities: bool = False, mode: str = "single-label",
+                   thresholds: dict[str, float] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     model.eval()
+    if mode == "multi-label":
+        return _evaluate_multilabel(
+            model, loader, device, names, include_probabilities=include_probabilities,
+            thresholds=thresholds,
+        )
     confusion = torch.zeros((len(names), len(names)), dtype=torch.int64)
     total_loss = 0.0
     total = 0
@@ -157,9 +179,101 @@ def evaluate_model(model: nn.Module, loader, device: torch.device, names: list[s
     return metrics, rows
 
 
+@torch.inference_mode()
+def _evaluate_multilabel(model: nn.Module, loader, device: torch.device, names: list[str],
+                         *, include_probabilities: bool = False,
+                         thresholds: dict[str, float] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    model.eval()
+    threshold_values = torch.tensor(
+        [float((thresholds or {}).get(name, 0.5)) for name in names], device=device,
+    )
+    total_loss = 0.0
+    total = exact_matches = 0
+    all_targets: list[torch.Tensor] = []
+    all_probabilities: list[torch.Tensor] = []
+    rows: list[dict[str, Any]] = []
+    for images, targets, paths in loader:
+        images, targets = images.to(device), targets.float().to(device)
+        logits = model(images)
+        probabilities = logits.sigmoid()
+        total_loss += float(nn.functional.binary_cross_entropy_with_logits(logits, targets)) * images.shape[0]
+        predictions = probabilities >= threshold_values
+        actual = targets >= 0.5
+        exact_matches += int((predictions == actual).all(dim=1).sum())
+        total += images.shape[0]
+        all_targets.append(actual.cpu())
+        all_probabilities.append(probabilities.cpu())
+        for position in range(images.shape[0]):
+            actual_indices = torch.where(actual[position])[0].cpu().tolist()
+            predicted_indices = torch.where(predictions[position])[0].cpu().tolist()
+            row: dict[str, Any] = {
+                "image": str(paths[position]),
+                "actual": json.dumps([names[index] for index in actual_indices]),
+                "predicted": json.dumps([names[index] for index in predicted_indices]),
+                "confidence": float(probabilities[position].max()),
+                "correct": actual_indices == predicted_indices,
+            }
+            if include_probabilities:
+                row["probabilities"] = [float(value) for value in probabilities[position].cpu()]
+                row["actual_indices"] = actual_indices
+                row["predicted_indices"] = predicted_indices
+            rows.append(row)
+
+    target_matrix = torch.cat(all_targets).numpy().astype(bool)
+    probability_matrix = torch.cat(all_probabilities).numpy()
+    prediction_matrix = probability_matrix >= threshold_values.cpu().numpy()[None, :]
+    per_class: dict[str, dict[str, float | int]] = {}
+    precisions: list[float] = []
+    recalls: list[float] = []
+    f1s: list[float] = []
+    aps: list[float] = []
+    total_tp = total_fp = total_fn = 0
+    for index, name in enumerate(names):
+        actual = target_matrix[:, index]
+        predicted = prediction_matrix[:, index]
+        tp = int((actual & predicted).sum())
+        fp = int((~actual & predicted).sum())
+        fn = int((actual & ~predicted).sum())
+        tn = int((~actual & ~predicted).sum())
+        precision = _safe_ratio(tp, tp + fp)
+        recall = _safe_ratio(tp, tp + fn)
+        f1 = _safe_ratio(2 * precision * recall, precision + recall)
+        ap = _average_precision(actual, probability_matrix[:, index])
+        per_class[name] = {
+            "precision": precision, "recall": recall, "f1": f1, "ap": ap,
+            "accuracy": _safe_ratio(tp + tn, total), "support": int(actual.sum()),
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        }
+        precisions.append(precision); recalls.append(recall); f1s.append(f1)
+        if actual.any():
+            aps.append(ap)
+        total_tp += tp; total_fp += fp; total_fn += fn
+    micro_precision = _safe_ratio(total_tp, total_tp + total_fp)
+    micro_recall = _safe_ratio(total_tp, total_tp + total_fn)
+    metrics = {
+        "classification_mode": "multi-label",
+        "loss": total_loss / max(total, 1),
+        "accuracy": exact_matches / max(total, 1),
+        "subset_accuracy": exact_matches / max(total, 1),
+        "micro_precision": micro_precision,
+        "micro_recall": micro_recall,
+        "micro_f1": _safe_ratio(2 * micro_precision * micro_recall, micro_precision + micro_recall),
+        "macro_precision": float(np.mean(precisions)),
+        "macro_recall": float(np.mean(recalls)),
+        "macro_f1": float(np.mean(f1s)),
+        "map": float(np.mean(aps)) if aps else 0.0,
+        "samples": total,
+        "classes": names,
+        "per_class": per_class,
+        "confusion_matrix": [],
+    }
+    return metrics, rows
+
+
 def _build_from_payload(payload: dict[str, Any], device: torch.device) -> nn.Module:
     names = list(payload["classes"])
-    if payload.get("format") in {"trainer-image-classifier-v2", "trainer-image-classifier-v3"}:
+    if payload.get("format") in {"trainer-image-classifier-v2", "trainer-image-classifier-v3",
+                                  "trainer-image-classifier-v4"}:
         model = build_architecture(
             "classification", str(payload.get("arch", "convnext-tiny")), num_classes=len(names),
             width=int(payload.get("width", 32)), dropout=float(payload.get("dropout", 0.15)),
@@ -213,8 +327,14 @@ def _optimizer(model: nn.Module, args: argparse.Namespace) -> torch.optim.Optimi
     return torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
 
 
-def _classification_loss(logits: torch.Tensor, targets: torch.Tensor, smoothing: float) -> torch.Tensor:
+def _classification_loss(logits: torch.Tensor, targets: torch.Tensor, smoothing: float,
+                         mode: str = "single-label") -> torch.Tensor:
     """Cross entropy for hard labels or augmentation-produced soft targets."""
+    if mode == "multi-label":
+        targets = targets.float()
+        if smoothing:
+            targets = targets * (1.0 - smoothing) + 0.5 * smoothing
+        return nn.functional.binary_cross_entropy_with_logits(logits, targets)
     if targets.ndim == 1:
         return nn.functional.cross_entropy(logits, targets, label_smoothing=smoothing)
     if smoothing:
@@ -224,9 +344,9 @@ def _classification_loss(logits: torch.Tensor, targets: torch.Tensor, smoothing:
 
 def _checkpoint_payload(model: nn.Module, ema: ModelEMA, names: list[str], args: argparse.Namespace,
                         epoch: int, metrics: dict[str, Any], history: list[dict[str, Any]],
-                        best_accuracy: float, optimizer, scheduler, scaler) -> dict[str, Any]:
+                        best_accuracy: float, optimizer, scheduler, scaler, mode: str) -> dict[str, Any]:
     return {
-        "format": "trainer-image-classifier-v3",
+        "format": "trainer-image-classifier-v4",
         "model": ema.ema.state_dict(),
         "raw_model": ModelEMA._unwrap(model).state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -234,6 +354,8 @@ def _checkpoint_payload(model: nn.Module, ema: ModelEMA, names: list[str], args:
         "scaler": scaler.state_dict(),
         "ema_state": ema.state_dict(),
         "classes": names,
+        "classification_mode": mode,
+        "activation": "sigmoid" if mode == "multi-label" else "softmax",
         "arch": args.arch,
         "imgsz": args.imgsz,
         "width": args.width,
@@ -300,7 +422,11 @@ def write_report(run_dir: Path, metrics: dict[str, Any], history: list[dict[str,
                  thresholds: dict[str, Any] | None = None) -> Path:
     run_dir = Path(run_dir)
     paths = _run_dirs(run_dir)
-    _plot_confusion(metrics["confusion_matrix"], list(metrics["classes"]), paths["plots"] / "confusion_matrix.png")
+    multi_label = metrics.get("classification_mode") == "multi-label"
+    confusion_section = ""
+    if metrics.get("confusion_matrix"):
+        _plot_confusion(metrics["confusion_matrix"], list(metrics["classes"]), paths["plots"] / "confusion_matrix.png")
+        confusion_section = '<h2>Confusion matrix</h2><img src="../plots/confusion_matrix.png" alt="Confusion matrix">'
     if history:
         x = np.array([float(row["epoch"]) for row in history])
         plot_curve(x, {
@@ -311,14 +437,17 @@ def write_report(run_dir: Path, metrics: dict[str, Any], history: list[dict[str,
                    paths["plots"] / "accuracy_curve.png", title="Classification accuracy",
                    xlabel="Epoch", ylabel="Accuracy")
 
-    summary = [
-        ("Accuracy", metrics["accuracy"]), ("Macro precision", metrics["macro_precision"]),
-        ("Macro recall", metrics["macro_recall"]), ("Macro F1", metrics["macro_f1"]),
-        ("Loss", metrics["loss"]), ("Samples", metrics["samples"]),
-    ]
+    summary = [("Exact-match accuracy" if multi_label else "Accuracy", metrics["accuracy"])]
+    if multi_label:
+        summary.extend([("mAP", metrics["map"]), ("Micro F1", metrics["micro_f1"])])
+    summary.extend([
+        ("Macro precision", metrics["macro_precision"]), ("Macro recall", metrics["macro_recall"]),
+        ("Macro F1", metrics["macro_f1"]), ("Loss", metrics["loss"]), ("Samples", metrics["samples"]),
+    ])
     class_rows = "".join(
         "<tr>" + "".join(f"<td>{html.escape(str(value))}</td>" for value in (
             name, f"{values['precision']:.4f}", f"{values['recall']:.4f}", f"{values['f1']:.4f}",
+            *([f"{values.get('ap', 0.0):.4f}"] if multi_label else []),
             values["support"], values["tp"], values["fp"], values["fn"], values["tn"],
         )) + "</tr>"
         for name, values in metrics["per_class"].items()
@@ -338,10 +467,10 @@ def write_report(run_dir: Path, metrics: dict[str, Any], history: list[dict[str,
     document = f"""<!doctype html><html><head><meta charset="utf-8"><title>Trainer classification report</title>
 <style>body{{font:15px system-ui;max-width:1100px;margin:36px auto;color:#18212f}}table{{border-collapse:collapse;width:100%;margin:16px 0}}th,td{{border:1px solid #d7dde5;padding:8px;text-align:right}}th:first-child,td:first-child{{text-align:left}}img{{max-width:100%;border:1px solid #d7dde5}}code{{background:#f2f4f7;padding:2px 5px}}</style></head><body>
 <h1>Trainer image classification report</h1><p>Generated {datetime.now().isoformat(timespec='minutes')}</p>
-<p><strong>Architecture:</strong> <code>{html.escape(model_name)}</code><br><strong>Dataset:</strong> <code>{html.escape(dataset)}</code></p>
+<p><strong>Architecture:</strong> <code>{html.escape(model_name)}</code><br><strong>Dataset:</strong> <code>{html.escape(dataset)}</code><br><strong>Target contract:</strong> <code>{'multi-label' if multi_label else 'single-label'}</code></p>
 <h2>Summary</h2><table>{summary_rows}</table>
-<h2>Per-class metrics</h2><table><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th><th>TP</th><th>FP</th><th>FN</th><th>TN</th></tr>{class_rows}</table>
-{threshold_section}<h2>Confusion matrix</h2><img src="../plots/confusion_matrix.png" alt="Confusion matrix">
+<h2>Per-class metrics</h2><table><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th>{'<th>AP</th>' if multi_label else ''}<th>Support</th><th>TP</th><th>FP</th><th>FN</th><th>TN</th></tr>{class_rows}</table>
+{threshold_section}{confusion_section}
 {('<h2>Training curves</h2><img src="../plots/loss_curve.png" alt="Loss curve"><img src="../plots/accuracy_curve.png" alt="Accuracy curve">' if history else '')}
 </body></html>"""
     destination = output or paths["reports"] / "report.html"
@@ -356,6 +485,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     output = Path(args.output)
     paths = _run_dirs(output)
     train_samples, val_samples, names = discover_training(Path(args.data), args.val_fraction, args.seed)
+    mode = classification_mode(train_samples + val_samples)
     save_json(paths["root"] / "classes.json", {str(index): value for index, value in enumerate(names)})
 
     resume_payload: dict[str, Any] | None = None
@@ -365,6 +495,8 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
         resume_payload = torch.load(resume_path, map_location="cpu", weights_only=False)
         if list(resume_payload.get("classes", [])) != names:
             raise ValueError("resume dataset classes do not match checkpoint classes")
+        if _payload_mode(resume_payload) != mode:
+            raise ValueError("resume dataset target contract does not match checkpoint classification mode")
         args.arch = str(resume_payload.get("arch", args.arch))
         args.width = int(resume_payload.get("width", args.width))
         args.dropout = float(resume_payload.get("dropout", args.dropout))
@@ -440,9 +572,10 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
     }
     tracker = build_tracker(tracker_cfg, output)
     tracker.log_params(vars(args))
-    tracker.set_tags({"task": "classification", "architecture": args.arch, "dataset": args.data})
+    tracker.set_tags({"task": "classification", "architecture": args.arch, "dataset": args.data,
+                      "classification_mode": mode})
     print(f"classifier: arch={args.arch}, {len(train_samples)} train, {len(val_samples)} val, "
-          f"{len(names)} classes, device={device}, run={output}")
+          f"{len(names)} classes, mode={mode}, device={device}, run={output}")
 
     metrics: dict[str, Any] = {}
     for epoch in range(start_epoch, args.epochs):
@@ -457,7 +590,7 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
                 images = images.to(memory_format=torch.channels_last)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 logits = model(images)
-                loss = _classification_loss(logits, labels, args.label_smoothing)
+                loss = _classification_loss(logits, labels, args.label_smoothing, mode)
             scaler.scale(loss / args.accumulate).backward()
             should_step = (batch_index + 1) % args.accumulate == 0 or batch_index + 1 == len(train_loader)
             if should_step:
@@ -470,39 +603,44 @@ def run_training(args: argparse.Namespace) -> dict[str, Any]:
             running_loss += float(loss.detach()) * images.shape[0]
             seen += images.shape[0]
         scheduler.step()
-        metrics, _ = evaluate_model(ema.ema, val_loader, device, names)
+        metrics, _ = evaluate_model(ema.ema, val_loader, device, names, mode=mode)
         row = {
             "epoch": epoch + 1,
             "train_loss": running_loss / max(seen, 1),
             "val_loss": metrics["loss"],
             "val_accuracy": metrics["accuracy"],
             "val_macro_f1": metrics["macro_f1"],
+            "val_map": metrics.get("map", metrics["macro_f1"]),
             "lr": optimizer.param_groups[0]["lr"],
             "epoch_seconds": time.perf_counter() - started,
         }
         history.append(row)
-        improved = metrics["accuracy"] > best_accuracy + args.min_delta
+        selection_score = metrics.get("map", metrics["accuracy"])
+        improved = selection_score > best_accuracy + args.min_delta
         if improved:
-            best_accuracy = float(metrics["accuracy"])
+            best_accuracy = float(selection_score)
             no_improve = 0
         else:
             no_improve += 1
         payload = _checkpoint_payload(model, ema, names, args, epoch + 1, metrics, history,
-                                      best_accuracy, optimizer, scheduler, scaler)
+                                      best_accuracy, optimizer, scheduler, scaler, mode)
         payload["augmentation"] = augmentation
         _save_checkpoint(payload, paths, best=improved, save_period=args.save_period)
         save_json(paths["root"] / "metrics.json", {
+            "best_score": best_accuracy, "selection_metric": "map" if mode == "multi-label" else "accuracy",
             "best_accuracy": best_accuracy, "history": history, "final": metrics,
         })
         _write_csv(paths["logs"] / "history.csv", history)
         tracker.log_metrics({
             "train/loss": row["train_loss"], "val/loss": row["val_loss"],
             "val/accuracy": row["val_accuracy"], "val/macro_f1": row["val_macro_f1"],
+            "val/map": row["val_map"],
             "lr": row["lr"], "epoch_time": row["epoch_seconds"],
         }, step=epoch)
         print(f"epoch {epoch + 1:>4}/{args.epochs} train_loss={row['train_loss']:.4f} "
               f"val_loss={row['val_loss']:.4f} accuracy={row['val_accuracy']:.4f} "
-              f"macro_f1={row['val_macro_f1']:.4f}")
+              f"macro_f1={row['val_macro_f1']:.4f}"
+              f"{' map=' + format(row['val_map'], '.4f') if mode == 'multi-label' else ''}")
         if epoch + 1 >= args.min_epochs and no_improve >= args.patience:
             print(f"early stopping at epoch {epoch + 1}; no improvement for {no_improve} epoch(s)")
             break
@@ -524,17 +662,20 @@ def evaluate(args: argparse.Namespace) -> int:
     device = select_device(args.device)
     model, payload = load_checkpoint(Path(args.checkpoint), device)
     names = list(payload["classes"])
-    samples = discover_evaluation(Path(args.data), names)
-    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers)
-    metrics, rows = evaluate_model(model, loader, device, names)
+    mode = _payload_mode(payload)
+    samples = discover_evaluation(Path(args.data), names, mode)
+    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers,
+                         num_classes=len(names))
+    metrics, rows = evaluate_model(model, loader, device, names, mode=mode)
     output = Path(args.output)
     save_json(output, metrics)
     public_rows = [{key: value for key, value in row.items() if key not in {"probabilities", "actual_index", "predicted_index"}}
                    for row in rows]
     _write_csv(output.with_name("per_image.csv"), public_rows)
-    confusion_rows = [{"actual": name, **{predicted: metrics["confusion_matrix"][index][column]
-                       for column, predicted in enumerate(names)}} for index, name in enumerate(names)]
-    _write_csv(output.with_name("confusion_matrix.csv"), confusion_rows)
+    if metrics.get("confusion_matrix"):
+        confusion_rows = [{"actual": name, **{predicted: metrics["confusion_matrix"][index][column]
+                           for column, predicted in enumerate(names)}} for index, name in enumerate(names)]
+        _write_csv(output.with_name("confusion_matrix.csv"), confusion_rows)
     write_report(output.parent, metrics, [], str(payload.get("arch", "classifier")), args.data)
     print(json.dumps(metrics, indent=2))
     return 0
@@ -553,27 +694,34 @@ def predict(args: argparse.Namespace) -> int:
     device = select_device(args.device)
     model, payload = load_checkpoint(Path(args.checkpoint), device)
     names = list(payload["classes"])
+    mode = _payload_mode(payload)
     samples = [Sample(path, 0) for path in source_images(Path(args.source))]
     if not samples:
         raise ValueError("image source is empty")
-    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers)
+    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers,
+                         num_classes=len(names))
     thresholds: dict[str, float] = {}
     if args.thresholds:
         thresholds = {str(key): float(value) for key, value in json.loads(Path(args.thresholds).read_text())["thresholds"].items()}
     rows: list[dict[str, Any]] = []
     model.eval()
     for images, _, paths in loader:
-        probabilities = model(images.to(device)).softmax(1).cpu()
+        logits = model(images.to(device))
+        probabilities = (logits.sigmoid() if mode == "multi-label" else logits.softmax(1)).cpu()
         top_values, top_indices = probabilities.topk(min(args.topk, len(names)), dim=1)
-        for values, indices, image_path in zip(top_values, top_indices, paths, strict=True):
+        for row_index, (values, indices, image_path) in enumerate(zip(top_values, top_indices, paths, strict=True)):
             best_name = names[int(indices[0])]
             best_confidence = float(values[0])
-            accepted = best_confidence >= thresholds.get(best_name, args.conf)
+            default_conf = args.conf if args.conf > 0 else (0.5 if mode == "multi-label" else 0.0)
+            accepted_indices = [index for index, probability in enumerate(probabilities[row_index])
+                                if float(probability) >= thresholds.get(names[index], default_conf)]
+            accepted = bool(accepted_indices) if mode == "multi-label" else best_confidence >= thresholds.get(best_name, default_conf)
             rows.append({
                 "image": image_path,
                 "class": best_name if accepted else "unknown",
                 "confidence": best_confidence,
                 "accepted": accepted,
+                "classes": json.dumps([names[index] for index in accepted_indices]) if mode == "multi-label" else json.dumps([best_name] if accepted else []),
                 "topk": json.dumps([{"class": names[int(index)], "confidence": float(value)}
                                      for value, index in zip(values, indices, strict=True)]),
             })
@@ -620,6 +768,9 @@ def export(args: argparse.Namespace) -> int:
         "architecture": payload.get("arch", "tiny-cnn"), "imgsz": payload["imgsz"],
         "normalization": {"scale": 255.0, "mean": [0.5, 0.5, 0.5], "std": [0.25, 0.25, 0.25]},
         "input": "images", "output": "logits", "onnx": str(onnx_output),
+        "classification_mode": _payload_mode(payload),
+        "activation": "sigmoid" if _payload_mode(payload) == "multi-label" else "softmax",
+        "default_threshold": 0.5 if _payload_mode(payload) == "multi-label" else None,
     }
     final_output = onnx_output
     if export_format != "onnx":
@@ -640,15 +791,22 @@ def tune_thresholds(args: argparse.Namespace) -> int:
     device = select_device(args.device)
     model, payload = load_checkpoint(Path(args.checkpoint), device)
     names = list(payload["classes"])
-    samples = discover_evaluation(Path(args.data), names)
-    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers)
-    metrics, rows = evaluate_model(model, loader, device, names, include_probabilities=True)
+    mode = _payload_mode(payload)
+    samples = discover_evaluation(Path(args.data), names, mode)
+    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers,
+                         num_classes=len(names))
+    metrics, rows = evaluate_model(model, loader, device, names, include_probabilities=True, mode=mode)
     grid = np.linspace(0.01, 0.99, args.steps)
     thresholds: dict[str, float] = {}
     diagnostics: dict[str, dict[str, float | int]] = {}
     for class_index, name in enumerate(names):
-        actual = np.array([row["actual_index"] == class_index for row in rows])
-        predicted = np.array([row["predicted_index"] == class_index for row in rows])
+        actual = np.array([
+            class_index in row["actual_indices"] if mode == "multi-label" else row["actual_index"] == class_index
+            for row in rows
+        ])
+        predicted = np.ones(len(rows), dtype=bool) if mode == "multi-label" else np.array([
+            row["predicted_index"] == class_index for row in rows
+        ])
         confidence = np.array([row["probabilities"][class_index] for row in rows])
         scores = []
         for threshold in grid:
@@ -674,13 +832,19 @@ def report(args: argparse.Namespace) -> int:
     device = select_device(args.device)
     model, payload = load_checkpoint(Path(args.checkpoint), device)
     names = list(payload["classes"])
-    samples = discover_evaluation(Path(args.data), names)
-    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers)
-    metrics, _ = evaluate_model(model, loader, device, names)
+    mode = _payload_mode(payload)
+    samples = discover_evaluation(Path(args.data), names, mode)
+    loader = make_loader(samples, int(payload["imgsz"]), args.batch, False, args.workers,
+                         num_classes=len(names))
+    threshold_payload = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
+    metrics, _ = evaluate_model(
+        model, loader, device, names, mode=mode,
+        thresholds=threshold_payload.get("thresholds") if threshold_payload else None,
+    )
     checkpoint = Path(args.checkpoint)
     run_dir = checkpoint.parent.parent if checkpoint.parent.name == "weights" else checkpoint.parent
     history = list(payload.get("history", [])) or _read_history(run_dir / "logs" / "history.csv")
-    thresholds = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
+    thresholds = threshold_payload
     destination = Path(args.output)
     write_report(destination.parent.parent if destination.parent.name == "reports" else destination.parent,
                  metrics, history, str(payload.get("arch", "classifier")), args.data,
@@ -703,11 +867,15 @@ def viz_augment(args: argparse.Namespace) -> int:
     images: list[np.ndarray] = []
     for index in range(min(args.n, len(dataset))):
         tensor, label, _ = dataset[index]
-        label_index = int(label.argmax()) if isinstance(label, torch.Tensor) else int(label)
+        if isinstance(label, torch.Tensor):
+            label_indices = torch.where(label >= 0.5)[0].tolist()
+            label_text = ", ".join(names[item] for item in label_indices[:4]) or "no positive labels"
+        else:
+            label_text = names[int(label)]
         rgb = np.clip((tensor.numpy().transpose(1, 2, 0) * 0.25 + 0.5) * 255, 0, 255).astype(np.uint8)
         image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         cv2.rectangle(image, (0, 0), (image.shape[1], 24), (0, 0, 0), -1)
-        cv2.putText(image, names[label_index], (5, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255),
+        cv2.putText(image, label_text[:54], (5, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255),
                     1, cv2.LINE_AA)
         images.append(image)
     output = Path(args.output)
@@ -764,18 +932,20 @@ def tune(args: argparse.Namespace) -> int:
         trial.dropout = rng.uniform(0.0, 0.35)
         trial.label_smoothing = rng.uniform(0.0, 0.15)
         metrics = run_training(trial)
+        score = metrics.get("map", metrics["accuracy"])
         value = {
-            "trial": index + 1, "accuracy": metrics["accuracy"], "macro_f1": metrics["macro_f1"],
+            "trial": index + 1, "accuracy": metrics["accuracy"], "map": metrics.get("map"),
+            "score": score, "macro_f1": metrics["macro_f1"],
             "lr": trial.lr, "weight_decay": trial.weight_decay, "dropout": trial.dropout,
             "label_smoothing": trial.label_smoothing, "run": trial.output,
         }
         trials.append(value)
-        if best is None or value["accuracy"] > best["accuracy"]:
+        if best is None or value["score"] > best["score"]:
             best = value
         save_json(root / "tune_results.json", {"best": best, "trials": trials})
-        print(f"tune trial {index + 1}/{args.iterations}: accuracy={value['accuracy']:.4f}")
+        print(f"tune trial {index + 1}/{args.iterations}: score={value['score']:.4f}")
     save_json(root / "best_hyp.json", {key: best[key] for key in
-              ("lr", "weight_decay", "dropout", "label_smoothing", "accuracy", "macro_f1")})
+              ("lr", "weight_decay", "dropout", "label_smoothing", "score", "accuracy", "map", "macro_f1")})
     return 0
 
 

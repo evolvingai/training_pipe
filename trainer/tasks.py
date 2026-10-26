@@ -70,7 +70,7 @@ def run_detection(action: str, params: dict[str, Any]) -> int:
 @register_task("classification", actions=("train", "finetune", "evaluate", "val", "predict", "export", "tune",
                                                   "tune-thresh", "report", "viz-augment", "bench-data", "xai"),
                default_architecture="convnext-tiny",
-               description="Full-lifecycle folder-based image classification.")
+               description="Full-lifecycle single-label folders and COCO multi-label image classification.")
 def run_classification(action: str, params: dict[str, Any]) -> int:
     from trainer.classification.engine import main as classifier_main
     action = "evaluate" if action == "val" else action
@@ -152,7 +152,7 @@ def run_video(action: str, params: dict[str, Any]) -> int:
     return video_main(argv)
 
 
-@register_task("vlm", actions=("tune", "train", "merge", "export"), default_architecture="hf-lora",
+@register_task("vlm", actions=("tune", "train", "evaluate", "val", "merge", "export"), default_architecture="hf-lora",
                description="Multimodal image-text PEFT/LoRA tuning.")
 def run_vlm(action: str, params: dict[str, Any]) -> int:
     if action == "export":
@@ -174,7 +174,7 @@ def run_vlm(action: str, params: dict[str, Any]) -> int:
         return vlm_export_main(argv)
 
     from automation.vlm_tune import main as vlm_main
-    action = "tune" if action == "train" else action
+    action = "tune" if action == "train" else "evaluate" if action == "val" else action
     arch = str(params.get("arch", "hf-lora")).lower().replace("_", "-")
     if arch != "hf-lora":
         raise ValueError(
@@ -185,13 +185,17 @@ def run_vlm(action: str, params: dict[str, Any]) -> int:
     argv = [action]
     _option(argv, "model", params.get("model"))
     _option(argv, "output", output)
-    if action == "tune":
+    if action in {"tune", "evaluate"}:
         _option(argv, "data", params.get("data"))
+    if action == "tune":
         _options(argv, params, ("epochs", "batch", "lr", "weight_decay", "max_length", "max_samples", "lora_r",
                                 "lora_alpha", "lora_dropout", "target_modules", "gradient_accumulation",
                                 "max_grad_norm", "log_every", "seed", "imgsz", *AUGMENTATION_OPTIONS))
         if "gradient_checkpointing" in params:
             _option(argv, "gradient_checkpointing", params["gradient_checkpointing"], boolean_optional=True)
+    elif action == "evaluate":
+        _option(argv, "adapter", params.get("adapter") or params.get("checkpoint"))
+        _options(argv, params, ("batch", "max_length", "max_samples"))
     else:
         _option(argv, "adapter", params.get("adapter") or params.get("checkpoint"))
     _options(argv, params, ("device", "dtype"))

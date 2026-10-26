@@ -12,9 +12,28 @@ const TARGET_KEY = 'trainer.targetAgent';
 const XAI_SAMPLE_JOB_KEY = 'trainer.classification.xaiSampleJob';
 const FAMILIES = {
   detection: { label: 'Detection', task: 'detection', prefix: 'detect_', data: 'YOLO labels + dataset TOML', export: 'Detector ONNX / TensorRT' },
-  classification: { label: 'Image Classification', task: 'classification', prefix: 'classifier_', data: 'Class-folder image datasets', export: 'Image classifier ONNX / TensorRT + class contract' },
+  classification: { label: 'Image Classification', task: 'classification', prefix: 'classifier_', data: 'COCO multi-label or class-folder datasets', export: 'Image classifier ONNX / TensorRT + target contract' },
   video: { label: 'Video / Action Classification', task: 'video-classification', prefix: 'video_', data: 'Class-folder video datasets', export: 'Video classifier ONNX / TensorRT + clip contract' },
   vlm: { label: 'VLM Tuning', task: 'vlm', prefix: 'vlm_', data: 'Image-text JSONL datasets', export: 'VLM ONNX / TensorRT forward graph, portable LoRA adapter, or merged model' },
+};
+
+const DATASET_RECOMMENDATIONS = {
+  detection: [
+    ['COCO 2017', 'Current baseline', 'Use val2017 for end-to-end smoke tests and train2017 for real training. Keeps boxes, classes, and COCO evaluation.'],
+    ['Custom COCO / YOLO', 'Production data', 'Profile the exported annotations first, then train through the existing detector framework.'],
+  ],
+  classification: [
+    ['COCO 2017 Instances', 'Current baseline', 'Treat every category present in one scene as a simultaneous positive image label.'],
+    ['Open Images', 'Scale-up option', 'Use when broader image-level labels and substantially more classes are needed after the COCO flow is stable.'],
+  ],
+  video: [
+    ['UCF101', 'First smoke dataset', 'Small enough to validate decoding, clip sampling, training, evaluation, prediction, and export.'],
+    ['Kinetics-400', 'Scale-up option', 'Use after UCF101 when the video pipeline and VM storage/throughput are proven.'],
+  ],
+  vlm: [
+    ['COCO Captions', 'First grounding dataset', 'Good for validating image-text ingestion, batching, LoRA tuning, and held-out evaluation.'],
+    ['LLaVA-Instruct-150K', 'Instruction tuning', 'Use for conversational visual instruction tuning after the base smoke flow works.'],
+  ],
 };
 
 async function api(path, options = {}) {
@@ -105,7 +124,9 @@ function applyFamilyChrome() {
 function setFamily(family) {
   localStorage.setItem(FAMILY_KEY, Object.hasOwn(FAMILIES, family) ? family : 'detection');
   applyFamilyChrome();
-  if ((location.hash || '#/dashboard') !== '#/dashboard') location.hash = '#/dashboard';
+  const view = (location.hash || '#/dashboard').split('/')[1];
+  if (view === 'data') route();
+  else if ((location.hash || '#/dashboard') !== '#/dashboard') location.hash = '#/dashboard';
   else route();
 }
 
@@ -341,7 +362,7 @@ function classificationForm(mode) {
     evaluate: `classifier_eval_${stamp}`, predict: `classifier_predict_${stamp}`, xai: `classifier_xai_${stamp}`, tune: `classifier_tune_${stamp}`,
   };
   const headers = {
-    train: ['Train classifier', 'Train the selected architecture plugin from class folders.'],
+    train: ['Train classifier', 'Train single-label class folders or multi-label COCO images with the selected architecture plugin.'],
     finetune: ['Finetune classifier', 'Transfer a checkpoint to the current classes and optionally freeze feature stages.'],
     evaluate: ['Evaluate classifier', 'Compute full metrics, tune per-class thresholds, and build the evaluation report.'],
     predict: ['Classify images', 'Write top-k predictions and apply optional per-class confidence thresholds.'],
@@ -350,10 +371,10 @@ function classificationForm(mode) {
   };
   let body = '';
   if (mode === 'train') body = `<div class="card"><h3>Classification dataset</h3>
-    ${field('data', 'Dataset root', { placeholder: '/data/species', required: true })}
+    ${field('data', 'Dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
     ${architectureField('arch', 'Architecture plugin', { value: 'convnext-tiny' })}
-    <div class="pipeline"><code>train/class_name/*.jpg</code><span>or</span><code>class_name/*.jpg</code></div>
-    <p class="muted">Explicit train/val folders are used as-is. A compact class-folder dataset is split deterministically per class.</p></div>
+    <div class="pipeline"><code>annotations/instances_*.json + train2017/</code><span>or</span><code>train/class_name/*.jpg</code></div>
+    <p class="muted">COCO is detected automatically and trained as multi-label category presence. Class folders retain single-label softmax training.</p></div>
     <div class="card"><h3>Training parameters</h3><div class="adv-grid">
       ${field('epochs', 'Epochs', { value: '30', type: 'number', min: 1 })}
       ${field('batch', 'Batch size', { value: '8', type: 'number', min: 1 })}
@@ -363,7 +384,7 @@ function classificationForm(mode) {
     </div>${field('resume', 'Resume checkpoint (optional)', { placeholder: '/runs/classifier/weights/last.pt' })}</div>`;
   if (mode === 'finetune') body = `<div class="card"><h3>Checkpoint and dataset</h3>
     ${field('checkpoint', 'Source checkpoint', { placeholder: '/runs/classifier/weights/best.pt', required: true })}
-    ${field('data', 'Dataset root', { placeholder: '/data/species', required: true })}
+    ${field('data', 'Dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
     ${architectureField('arch', 'Architecture override (optional)', { optional: true })}</div>
     <div class="card"><h3>Finetuning parameters</h3><div class="adv-grid">
       ${field('epochs', 'Epochs', { value: '20', type: 'number', min: 1 })}
@@ -374,9 +395,9 @@ function classificationForm(mode) {
     </div></div>`;
   if (mode === 'evaluate') body = `<div class="card"><h3>Evaluation inputs</h3>
     ${field('checkpoint', 'Classifier checkpoint', { placeholder: '/runs/classifier/weights/best.pt', required: true })}
-    ${field('data', 'Labelled dataset root', { placeholder: '/data/species', required: true })}
+    ${field('data', 'Labelled dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
     ${field('batch', 'Batch size', { value: '32', type: 'number', min: 1 })}
-    <p class="muted">Produces metrics JSON, per-image CSV, confusion matrix, optimized class thresholds, and an HTML report.</p></div>`;
+    <p class="muted">Produces metrics JSON, per-image CSV, optimized class thresholds, an HTML report, and a confusion matrix for single-label runs.</p></div>`;
   if (mode === 'predict') body = `<div class="card"><h3>Prediction inputs</h3>
     ${field('checkpoint', 'Classifier checkpoint', { placeholder: '/runs/classifier/weights/best.pt', required: true })}
     ${field('source', 'Image or directory', { placeholder: '/data/images', required: true })}
@@ -396,7 +417,7 @@ function classificationForm(mode) {
       ${field('intensity', 'Overlay intensity', { value: '0.72', type: 'number', min: 0.05, step: 0.05 })}
     </div><p class="muted">Red supports the selected class; blue opposes it. The result keeps the prediction and highest-energy feature channels together for each selected sample.</p></div>`;
   if (mode === 'tune') body = `<div class="card"><h3>Tuning inputs</h3>
-    ${field('data', 'Dataset root', { placeholder: '/data/species', required: true })}
+    ${field('data', 'Dataset root or COCO annotations', { placeholder: '/data/coco', required: true })}
     ${architectureField('arch', 'Architecture plugin', { value: 'convnext-tiny' })}
     <div class="adv-grid">
       ${field('iterations', 'Trials', { value: '10', type: 'number', min: 1 })}
@@ -446,8 +467,27 @@ function videoForm(mode) {
     </form>`;
 }
 
-function vlmForm() {
+function vlmForm(mode) {
   const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
+  if (mode === 'evaluate') {
+    return `<h2 class="page-title">Evaluate vision-language model</h2><p class="page-sub">Measure teacher-forced loss, perplexity, and answer-token accuracy on one explicit image-text dataset.</p>
+      <form id="run-form" data-type="vlm_evaluate">
+        ${commonRunFields(`vlm_eval_${stamp}`)}
+        <div class="card"><h3>Evaluation inputs</h3>
+          ${field('model', 'Base model', { placeholder: 'organization/model-name', required: true })}
+          ${field('adapter', 'LoRA adapter directory (optional)', { placeholder: '/runs/vlm_lora/adapter' })}
+          ${field('data', 'Evaluation JSONL', { placeholder: '/data/vlm/validation.jsonl', required: true })}
+          <div class="adv-grid">
+            ${field('batch', 'Batch size', { value: '1', type: 'number', min: 1 })}
+            ${field('maxLength', 'Max tokens', { value: '1024', type: 'number', min: 32 })}
+            ${field('maxSamples', 'Maximum samples', { value: '1000', type: 'number', min: 1 })}
+          </div>
+          <label class="field"><span>Compute dtype</span><select name="dtype"><option value="auto">Auto</option><option value="bfloat16">bfloat16</option><option value="float16">float16</option><option value="float32">float32</option></select></label>
+          <label class="inline-check"><input type="checkbox" name="trustRemoteCode" /> Allow model repository custom code</label>
+          <p class="muted">Evaluation does not augment the validation set. Results are comparable only when the JSONL and requested split are identical.</p>
+        </div>${advancedFields()}${runActions('VLM evaluation')}
+      </form>`;
+  }
   return `<h2 class="page-title">Tune vision-language model</h2><p class="page-sub">Create a portable PEFT LoRA adapter from image, prompt, and answer examples.</p>
     <form id="run-form" data-type="vlm_tune">
       ${commonRunFields(`vlm_lora_${stamp}`)}
@@ -553,6 +593,7 @@ async function renderDashboard(main) {
       <div class="card"><h3>Model registry</h3><p class="muted">Installed architecture plugins, their contracts, and the exact model flow.</p><a class="btn" href="#/models">Open models</a></div>
       <div class="card"><h3>xAI</h3><p class="muted">Inspect a test sample together with its prediction, confidence, explanation, and activations.</p><a class="btn" href="#/evidence">Open xAI</a></div>
     </div>
+    <div class="card"><h3>Evaluations</h3><p class="muted">Compare checkpoints only when they were evaluated on the same dataset and split.</p><a class="btn" href="#/evaluations">Open evaluations</a></div>
     <div class="card"><h3>Runs</h3>${checkpoints.length ? `<table><thead><tr><th>Checkpoint</th><th>Agent</th></tr></thead><tbody>${Object.entries(inventory).flatMap(([agentId, value]) => (value.checkpoints || []).filter(checkpointMatches).slice(-8).map((item) => `<tr><td><code>${esc(item)}</code></td><td>${esc(agentId)}</td></tr>`)).join('')}</tbody></table>` : '<div class="empty">No checkpoint inventory yet.</div>'}</div>
     <div class="card"><h3>Jobs</h3>${jobTable(familyJobs.slice(0, 10))}</div>`;
   bindMachinePicker(agents);
@@ -601,26 +642,27 @@ function bindDiscoveredRuns() {
   }));
 }
 
-async function renderNew(main) {
+async function renderNew(main, initialMode = '') {
   const { agents } = await api('/agents');
   const family = currentFamily();
   const modes = family === 'detection'
     ? [['train', 'Train'], ['finetune', 'Finetune'], ['evaluate', 'Evaluate'], ['predict', 'Predict'], ['tune', 'Tune']]
     : family === 'classification'
       ? [['train', 'Train'], ['finetune', 'Finetune'], ['evaluate', 'Evaluate'], ['predict', 'Predict'], ['xai', 'xAI'], ['tune', 'Tune']]
-    : family === 'vlm' ? [['tune', 'LoRA Tune']] : [['train', 'Train'], ['evaluate', 'Evaluate'], ['predict', 'Predict']];
+    : family === 'vlm' ? [['tune', 'LoRA Tune'], ['evaluate', 'Evaluate']] : [['train', 'Train'], ['evaluate', 'Evaluate'], ['predict', 'Predict']];
+  const selectedMode = modes.some(([value]) => value === initialMode) ? initialMode : modes[0][0];
   main.innerHTML = `<h2 class="page-title">New ${familyLabel()} Run</h2><p class="page-sub">Choose the operation, target machine and device, then preview or queue it.</p>
     <div id="new-target">${machinePickerHtml(agents)}</div>
-    <div class="seg" id="mode-seg">${modes.map(([value, label], index) => `<button data-mode="${value}" class="${index === 0 ? 'active' : ''}">${label}</button>`).join('')}</div>
+    <div class="seg" id="mode-seg">${modes.map(([value, label]) => `<button data-mode="${value}" class="${value === selectedMode ? 'active' : ''}">${label}</button>`).join('')}</div>
     <div id="mode-form"></div>`;
   bindMachinePicker(agents);
   const show = (mode) => {
     $('#mode-form').innerHTML = family === 'detection' ? detectionForm(mode)
       : family === 'classification' ? classificationForm(mode)
-        : family === 'video' ? videoForm(mode) : vlmForm();
+        : family === 'video' ? videoForm(mode) : vlmForm(mode);
     bindRunForm();
   };
-  show(modes[0][0]);
+  show(selectedMode);
   $$('#mode-seg button').forEach((button) => button.addEventListener('click', () => {
     $$('#mode-seg button').forEach((item) => item.classList.toggle('active', item === button));
     show(button.dataset.mode);
@@ -678,27 +720,100 @@ async function renderExport(main) {
   bindRunForm();
 }
 
+function datasetNumber(value) {
+  const numeric = Number(value || 0);
+  return Number.isFinite(numeric) ? numeric.toLocaleString() : '0';
+}
+
+const DATASET_SPLIT_COLORS = ['#64d2ff', '#5e5ce6', '#30d158', '#ff9f0a', '#bf5af2', '#ff375f'];
+
+function datasetClassRowsHtml(profile, selectedSplit = 'all') {
+  const splitNames = (profile.splits || []).map((split) => split.name);
+  const classes = [...(profile.classes || [])]
+    .sort((left, right) => Number(right.total || 0) - Number(left.total || 0))
+    .slice(0, 120);
+  const counts = classes.map((item) => selectedSplit === 'all'
+    ? Number(item.total || 0) : Number(item.splits?.[selectedSplit] || 0));
+  const maximum = Math.max(1, ...counts);
+  if (!classes.length) return `<div class="empty">${profile.family === 'vlm'
+    ? 'VLM JSONL has no class labels; prompt and answer composition is shown below.'
+    : 'No labeled classes were found in this dataset.'}</div>`;
+  const unit = profile.format === 'coco-multilabel' ? 'positive image label' : 'annotation';
+  return `<div class="golden-head-table">${classes.map((item) => {
+    const total = selectedSplit === 'all' ? Number(item.total || 0) : Number(item.splits?.[selectedSplit] || 0);
+    const visible = selectedSplit === 'all'
+      ? splitNames.map((split, index) => ({ split, index, count: Number(item.splits?.[split] || 0) })).filter((entry) => entry.count > 0)
+      : [{ split: selectedSplit, index: Math.max(0, splitNames.indexOf(selectedSplit)), count: total }].filter((entry) => entry.count > 0);
+    const segments = selectedSplit === 'all'
+      ? visible.map((entry) => `<span style="width:${Math.max(.4, 100 * entry.count / maximum)}%;background:${DATASET_SPLIT_COLORS[entry.index % DATASET_SPLIT_COLORS.length]}" title="${esc(entry.split)}: ${datasetNumber(entry.count)}"></span>`).join('')
+      : (total ? `<span style="width:${Math.max(.4, 100 * total / maximum)}%;background:${DATASET_SPLIT_COLORS[visible[0]?.index % DATASET_SPLIT_COLORS.length]}" title="${esc(selectedSplit)}: ${datasetNumber(total)}"></span>` : '');
+    return `<div class="golden-head-row"><div class="golden-head-name"><strong>${esc(item.name)}</strong><span>${datasetNumber(total)} ${unit}${total === 1 ? '' : 's'}${selectedSplit === 'all' ? ' across all splits' : ` in ${esc(selectedSplit)}`}</span></div>
+      <div class="golden-level-bar ${total ? '' : 'distribution-empty'}">${segments}</div>
+      <div class="golden-level-counts">${visible.length ? visible.map((entry) => `<span style="color:${DATASET_SPLIT_COLORS[entry.index % DATASET_SPLIT_COLORS.length]}"><b>${esc(entry.split)}</b> ${datasetNumber(entry.count)}</span>`).join('') : '<span class="level-missing-text"><b>No annotations</b> 0</span>'}</div></div>`;
+  }).join('')}</div>`;
+}
+
+function datasetProfileDetail(profile) {
+  const summary = profile.summary || {};
+  const splitNames = (profile.splits || []).map((split) => split.name);
+  const classes = profile.classes || [];
+  const annotationLabel = profile.format === 'coco-multilabel' ? 'Positive labels' : 'Annotations';
+  const splitRows = (profile.splits || []).map((split) => `<tr><td><strong>${esc(split.name)}</strong></td><td>${datasetNumber(split.samples)}</td><td>${datasetNumber(split.images)}</td><td>${datasetNumber(split.annotations)}</td><td>${datasetNumber(split.classes)}</td><td>${datasetNumber(split.unlabeled)}</td><td>${datasetNumber(split.invalid)}</td></tr>`).join('');
+  const qualityIssues = Number(summary.unlabeled || 0) + Number(summary.invalid || 0);
+  const boxes = profile.boxSizes || {};
+  const boxTotal = Number(boxes.small || 0) + Number(boxes.medium || 0) + Number(boxes.large || 0);
+  const boxColors = { small: '#64d2ff', medium: '#ffcc00', large: '#ff9f0a' };
+  const boxHtml = profile.family === 'detection' && boxTotal ? `<section class="card golden-distribution"><div class="row spread golden-distribution-title"><div><span class="control-kicker">Object scale</span><h3>Bounding-box sizes</h3></div><span class="golden-badge frozen">COCO area thresholds</span></div>
+    <div class="golden-legend">${Object.entries(boxColors).map(([key, color]) => `<span><i style="background:${color}"></i>${key}</span>`).join('')}</div>
+    <div class="golden-head-table"><div class="golden-head-row"><div class="golden-head-name"><strong>Object annotations</strong><span>${datasetNumber(boxTotal)} valid boxes</span></div><div class="golden-level-bar">${Object.entries(boxColors).map(([key, color]) => Number(boxes[key] || 0) ? `<span style="width:${Math.max(.4, 100 * Number(boxes[key]) / boxTotal)}%;background:${color}" title="${key}: ${datasetNumber(boxes[key])}"></span>` : '').join('')}</div><div class="golden-level-counts">${Object.entries(boxColors).map(([key, color]) => `<span style="color:${color}"><b>${key}</b> ${datasetNumber(boxes[key])}</span>`).join('')}</div></div></div></section>` : '';
+  const textHtml = profile.family === 'vlm' ? `<section class="card golden-distribution"><div class="row spread golden-distribution-title"><div><span class="control-kicker">Prompt / answer contract</span><h3>Text composition</h3></div><span class="golden-badge live">JSONL</span></div><div class="golden-kpis"><div><strong>${datasetNumber(Math.round(profile.text?.averagePromptCharacters || 0))}</strong><span>average prompt characters</span></div><div><strong>${datasetNumber(Math.round(profile.text?.averageAnswerCharacters || 0))}</strong><span>average answer characters</span></div><div><strong>${datasetNumber(summary.samples)}</strong><span>paired samples</span></div><div><strong>${datasetNumber(summary.unlabeled)}</strong><span>missing images</span></div></div></section>` : '';
+  return `<div class="golden-source-grid"><article class="card golden-source-card live"><div class="row spread"><div><span class="control-kicker">Dataset snapshot</span><h3>${esc(profile.name)}</h3></div><span class="golden-badge live">${esc(profile.format)}</span></div>
+      <div class="golden-kpis"><div><strong>${datasetNumber(summary.samples)}</strong><span>${profile.family === 'video' ? 'video clips' : 'samples'}</span></div><div><strong>${datasetNumber(summary.annotations)}</strong><span>${profile.format === 'coco-multilabel' ? 'positive image labels' : 'annotations'}</span></div><div><strong>${datasetNumber(summary.classes)}</strong><span>classes</span></div><div><strong>${datasetNumber(profile.splits?.length)}</strong><span>splits</span></div></div><p><code>${esc(profile.source)}</code></p></article>
+    <article class="card golden-source-card ${qualityIssues ? 'frozen' : 'live'}"><div class="row spread"><div><span class="control-kicker">Data quality</span><h3>${qualityIssues ? 'Review required' : 'Profile clean'}</h3></div><span class="golden-badge ${qualityIssues ? 'frozen' : 'live'}">${qualityIssues ? `${datasetNumber(qualityIssues)} issues` : 'Ready'}</span></div>
+      <div class="golden-kpis"><div><strong>${datasetNumber(summary.labeled)}</strong><span>labeled samples</span></div><div><strong>${datasetNumber(summary.unlabeled)}</strong><span>unlabeled / missing</span></div><div><strong>${datasetNumber(summary.invalid)}</strong><span>invalid records</span></div><div><strong>${datasetNumber(summary.crowd)}</strong><span>crowd annotations</span></div></div><p>Profiled on <strong>${esc(profile.agentId || 'unknown machine')}</strong> · ${esc(fmtTime(profile.generatedAt))}</p></article></div>
+    <section class="card golden-splits"><div><span class="control-kicker">Dataset manifests</span><h3>Split composition</h3><p class="muted">Counts belong to this exact COCO or custom dataset profile.</p></div><div class="table-scroll"><table><thead><tr><th>Split</th><th>Samples</th><th>Images</th><th>${annotationLabel}</th><th>Classes</th><th>Unlabeled</th><th>Invalid</th></tr></thead><tbody>${splitRows || '<tr><td colspan="7">No split data</td></tr>'}</tbody></table></div></section>
+    <section class="card golden-distribution"><div class="row spread golden-distribution-title"><div><span class="control-kicker">Ground-truth distribution</span><h3>Class distribution</h3></div><div class="golden-view-controls"><select id="dataset-distribution-split"><option value="all">All splits</option>${splitNames.map((split) => `<option value="${esc(split)}">${esc(split)}</option>`).join('')}</select></div></div>
+      <div class="golden-legend">${splitNames.map((split, index) => `<span><i style="background:${DATASET_SPLIT_COLORS[index % DATASET_SPLIT_COLORS.length]}"></i>${esc(split)}</span>`).join('')}</div><div id="dataset-class-distribution">${datasetClassRowsHtml(profile)}</div></section>
+    ${boxHtml}${textHtml}<details class="card golden-policy"><summary>Definitions and traceability</summary><p><strong>Format:</strong> ${esc(profile.format)}</p><p><strong>Source:</strong> <code>${esc(profile.source)}</code></p><p><strong>Profile job:</strong> ${esc(profile.jobName || profile.jobId || 'not recorded')}</p><p><strong>Machine:</strong> ${esc(profile.agentId || 'not recorded')}</p></details>`;
+}
+
 async function renderData(main) {
-  const [{ inventory }, { agents }] = await Promise.all([api('/inventory'), api('/agents')]);
   const family = currentFamily();
-  const detection = family === 'detection';
-  const trees = {
-    detection: `dataset.toml\nimages/train/*.jpg\nimages/val/*.jpg\nlabels/train/*.txt\nlabels/val/*.txt`,
-    classification: `dataset/\n  train/<class>/*.jpg\n  val/<class>/*.jpg\n\n# or compact\ndataset/<class>/*.jpg`,
-    video: `dataset/\n  train/<action>/*.mp4\n  val/<action>/*.mp4\n\n# or compact\ndataset/<action>/*.mp4`,
-    vlm: `vlm/\n  train.jsonl\n  images/*.jpg\n\n# JSONL row\n{"image":"images/1.jpg","prompt":"...","answer":"..."}`,
+  const profileType = { detection: 'detect_dataset_profile', classification: 'classifier_dataset_profile', video: 'video_dataset_profile', vlm: 'vlm_dataset_profile' }[family];
+  const inputHelp = {
+    detection: ['COCO annotation JSON, COCO root, or custom YOLO TOML', '/data/coco/annotations/instances_val2017.json'],
+    classification: ['COCO annotation JSON/root or class-folder dataset', '/data/coco/annotations/instances_val2017.json'],
+    video: ['Class-folder video dataset root', '/data/actions'],
+    vlm: ['Image-text JSONL', '/data/vlm/validation.jsonl'],
+  }[family];
+  main.innerHTML = `<div class="golden-header"><div><span class="control-kicker">${esc(familyLabel())} · COCO / custom</span><h2 class="page-title">Dataset Explorer</h2><p class="page-sub">Dataset composition rendered with the same visual language as AI Automation.</p></div></div><div class="model-card-loading"><div class="evidence-loading"></div><span>Loading ${esc(familyLabel())} dataset statistics…</span></div>`;
+  const [{ profiles }, { agents }] = await Promise.all([
+    api(`/dataset-profiles?family=${encodeURIComponent(family)}&limit=100`), api('/agents'),
+  ]);
+  const stamp = new Date().toISOString().slice(0, 10).replaceAll('-', '_');
+  const latest = profiles[0];
+  const recommendations = DATASET_RECOMMENDATIONS[family].map(([name, role, detail]) => `<article class="card dataset-recommendation"><span class="control-kicker">${esc(role)}</span><h3>${esc(name)}</h3><p>${esc(detail)}</p></article>`).join('');
+  main.innerHTML = `<div class="golden-header"><div><span class="control-kicker">${esc(familyLabel())} · COCO / custom</span><h2 class="page-title">Dataset Explorer</h2><p class="page-sub">Dataset composition rendered with the same source cards, manifest table, and distribution rows as AI Automation.</p></div>
+    <div class="golden-refresh"><span class="golden-live-dot ${latest ? '' : 'frozen'}"></span><span><strong>${latest ? 'Latest profile' : 'No profile'}</strong><small>${latest ? esc(fmtTime(latest.generatedAt)) : 'profile a dataset below'}</small></span><button class="btn primary small" id="dataset-profile-new">Profile dataset</button></div></div>
+    <section class="dataset-recommendations"><div class="dataset-recommendation-head"><span class="control-kicker">Recommended progression</span><h3>Datasets for ${esc(familyLabel())}</h3><p class="muted">Start with the smoke dataset, then move to the scale-up option after the full lifecycle passes.</p></div><div class="dataset-recommendation-grid">${recommendations}</div></section>
+    ${profiles.length ? `<label class="field dataset-profile-select"><span>Dataset snapshot</span><select id="dataset-profile-select">${profiles.map((profile, index) => `<option value="${index}">${esc(profile.name)} · ${esc(profile.format)} · ${esc(fmtTime(profile.generatedAt))}</option>`).join('')}</select></label><div id="dataset-profile-root"></div>` : `<section class="card golden-empty"><div class="evidence-loading"></div><div><h3>First dataset profile is pending</h3><p>Profile COCO or a custom dataset on one of the configured Trainer machines.</p></div></section>`}
+    <details class="card golden-policy dataset-profile-form" id="dataset-profile-form"><summary>Profile COCO or a custom dataset</summary><p>COCO annotations drive detection and multi-label image classification. Custom YOLO TOML, class folders, video folders, and VLM JSONL use the same visual workspace.</p>
+      ${machinePickerHtml(agents)}<form id="run-form" data-type="${profileType}">${commonRunFields(`dataset_profile_${stamp}`)}<div class="card"><h3>Dataset source</h3>${field('data', inputHelp[0], { placeholder: inputHelp[1], required: true })}<p class="muted">Raw dataset files stay on the selected machine.</p></div>${advancedFields()}${runActions('dataset profile')}</form></details>`;
+  const draw = () => {
+    const index = Number($('#dataset-profile-select')?.value || 0);
+    const profile = profiles[index];
+    if ($('#dataset-profile-root') && profile) {
+      $('#dataset-profile-root').innerHTML = datasetProfileDetail(profile);
+      $('#dataset-distribution-split')?.addEventListener('change', (event) => {
+        $('#dataset-class-distribution').innerHTML = datasetClassRowsHtml(profile, event.target.value);
+      });
+    }
   };
-  const notes = {
-    detection: 'The TOML maps train/val image sources and numeric class names. Labels use normalized YOLO cls cx cy w h rows.',
-    classification: 'Folders define image class names. Compact datasets receive a deterministic per-class validation split.',
-    video: 'Folders define action classes. Trainer samples a fixed number of frames and processes them with the selected temporal architecture plugin.',
-    vlm: 'Each JSONL row points to a local image and contains the user prompt and assistant answer. Chat-style messages are also accepted.',
-  };
-  main.innerHTML = `<h2 class="page-title">Data</h2><p class="page-sub">${familyLabel()} dataset contract and machine inventory</p>
-    <div class="card"><h3>${familyLabel()} layout</h3><div class="cmd-box">${esc(trees[family])}</div>
-      <p class="muted">${notes[family]}</p></div>
-    <div class="card"><h3>Compute and storage</h3>${machineList(agents).length ? `<div class="compute-grid">${machineList(agents).map(machineCardHtml).join('')}</div>` : '<div class="empty">No compute target is configured.</div>'}</div>
-    <div class="card"><h3>Checkpoints</h3>${Object.keys(inventory || {}).length ? `<table><thead><tr><th>Agent</th><th>Path</th></tr></thead><tbody>${Object.entries(inventory).flatMap(([agentId, value]) => (value.checkpoints || []).map((checkpoint) => `<tr><td>${esc(agentId)}</td><td><code>${esc(checkpoint)}</code></td></tr>`)).join('')}</tbody></table>` : '<div class="empty">The agent has not published checkpoint inventory yet.</div>'}</div>`;
+  $('#dataset-profile-select')?.addEventListener('change', draw);
+  $('#dataset-profile-new')?.addEventListener('click', () => {
+    const details = $('#dataset-profile-form'); details.open = true; details.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  draw(); bindMachinePicker(agents); bindRunForm();
 }
 
 function fmtBytes(value) {
@@ -721,7 +836,7 @@ async function renderModels(main) {
 
   main.innerHTML = `<div class="model-registry-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">Model registry</h2>
       <p class="page-sub">The registry is generated from the Python plugins installed on this control plane, including external entry-point plugins.</p></div>
-      <div class="row"><a class="btn primary" href="#/new">New run</a><a class="btn" href="#/evidence">Open xAI</a></div></div>
+      <div class="row"><a class="btn primary" href="#/new">New run</a><a class="btn" href="#/evaluations">Evaluations</a><a class="btn" href="#/evidence">Open xAI</a></div></div>
     ${payload.warning ? `<div class="warn-banner">Registry warning: ${esc(payload.warning)}</div>` : ''}
     <section class="model-registry-kpis">
       <div><span>Architectures</span><strong>${models.length}</strong><small>installed for this family</small></div>
@@ -784,7 +899,7 @@ async function renderModels(main) {
       <dl class="model-specs"><div><dt>Input</dt><dd>${esc(model.inputContract)}</dd></div><div><dt>Output</dt><dd>${esc(model.outputContract)}</dd></div></dl>
       <section><span>Training strategy</span><p>${esc(model.trainingStrategy)}</p></section>
       ${model.aliases?.length ? `<section><span>Aliases</span><p><code>${esc(model.aliases.join(', '))}</code></p></section>` : ''}
-      <footer><button type="button" class="btn small primary use-architecture" data-architecture="${esc(model.name)}">Use in New Run</button><button type="button" class="btn small inspect-architecture" data-architecture="${esc(model.name)}">Inspect flow</button><a class="btn small" href="#/evidence">xAI</a></footer>
+      <footer><button type="button" class="btn small primary use-architecture" data-architecture="${esc(model.name)}">Use in New Run</button><button type="button" class="btn small inspect-architecture" data-architecture="${esc(model.name)}">Inspect flow</button><a class="btn small" href="#/evaluations">Evaluations</a><a class="btn small" href="#/evidence">xAI</a></footer>
     </article>`).join('') || '<div class="empty">No architectures match these filters.</div>';
     $$('.inspect-architecture').forEach((button) => button.addEventListener('click', () => {
       activeName = button.dataset.architecture; drawFlow(); drawRegistry(); $('.architecture-flow-card')?.scrollIntoView({ behavior: 'smooth' });
@@ -1094,6 +1209,161 @@ async function renderEvidence(main) {
   }
 }
 
+function evaluationNumber(value, { percent = true, digits = 3 } = {}) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  return percent ? `${(Number(value) * 100).toFixed(1)}%` : Number(value).toFixed(digits);
+}
+
+function evaluationSpec(family) {
+  if (family === 'detection') return {
+    headline: 'Detector evaluations',
+    subtitle: 'Checkpoints re-evaluated together on one explicit dataset and validation split.',
+    columns: [
+      ['map5095', 'mAP50–95'], ['map50', 'mAP50'], ['precision', 'Precision'],
+      ['recall', 'Recall'], ['lowestRecall', 'Lowest recall'],
+    ],
+    cards: [['map5095', 'mAP50–95'], ['map50', 'mAP50'], ['precision', 'Precision'], ['recall', 'Recall']],
+  };
+  if (family === 'classification') return {
+    headline: 'Image classification evaluations',
+    subtitle: 'Single-label and COCO multi-label classifiers re-evaluated on one explicit dataset and split.',
+    columns: [
+      ['map', 'mAP'], ['microF1', 'Micro F1'], ['macroF1', 'Macro F1'], ['accuracy', 'Exact / top-1 accuracy'],
+      ['lowestRecall', 'Lowest recall'],
+    ],
+    cards: [['map', 'mAP'], ['microF1', 'Micro F1'], ['macroF1', 'Macro F1'], ['accuracy', 'Exact / top-1 accuracy']],
+  };
+  if (family === 'video') return {
+    headline: 'Video / action evaluations',
+    subtitle: 'Action checkpoints re-evaluated together on one explicit video dataset and split.',
+    columns: [['accuracy', 'Accuracy'], ['loss', 'Loss', false], ['lowestAccuracy', 'Lowest class accuracy']],
+    cards: [['accuracy', 'Accuracy'], ['loss', 'Loss', false], ['lowestAccuracy', 'Lowest class accuracy'], ['samples', 'Clips', false]],
+  };
+  return {
+    headline: 'VLM evaluations',
+    subtitle: 'Base models and adapters re-evaluated together on one explicit image-text dataset and split.',
+    columns: [['tokenAccuracy', 'Token accuracy'], ['loss', 'Loss', false], ['perplexity', 'Perplexity', false], ['evaluatedTokens', 'Evaluated tokens', false]],
+    cards: [['tokenAccuracy', 'Token accuracy'], ['loss', 'Loss', false], ['perplexity', 'Perplexity', false], ['evaluatedTokens', 'Evaluated tokens', false]],
+  };
+}
+
+function evaluationValue(record, key) {
+  if (key === 'samples') return record.samples;
+  if (key === 'lowestRecall') {
+    const values = (record.classes || []).map((item) => item.recall).filter((item) => item != null);
+    return values.length ? Math.min(...values) : null;
+  }
+  if (key === 'lowestAccuracy') {
+    const values = (record.classes || []).map((item) => item.accuracy).filter((item) => item != null);
+    return values.length ? Math.min(...values) : null;
+  }
+  return record.metrics?.[key] ?? null;
+}
+
+function evaluationMetric(value, percent = true) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  if (!percent && Number.isInteger(Number(value))) return Number(value).toLocaleString();
+  return evaluationNumber(value, { percent, digits: 3 });
+}
+
+function evaluationClassTable(record) {
+  const rows = record.classes || [];
+  if (!rows.length) return '';
+  const detection = record.family === 'detection';
+  const video = record.family === 'video';
+  const multiLabel = record.family === 'classification' && rows.some((item) => item.ap != null);
+  const headers = detection
+    ? ['Class', 'Precision', 'Recall', 'AP50', 'AP50–95']
+    : video ? ['Class', 'Accuracy', 'Support']
+      : multiLabel ? ['Class', 'Precision', 'Recall', 'F1', 'AP', 'Support']
+        : ['Class', 'Precision', 'Recall', 'F1', 'Support'];
+  const cells = (item) => detection
+    ? [item.name, evaluationMetric(item.precision), evaluationMetric(item.recall), evaluationMetric(item.ap50), evaluationMetric(item.map5095)]
+    : video ? [item.name, evaluationMetric(item.accuracy), evaluationMetric(item.support, false)]
+      : multiLabel
+        ? [item.name, evaluationMetric(item.precision), evaluationMetric(item.recall), evaluationMetric(item.f1), evaluationMetric(item.ap), evaluationMetric(item.support, false)]
+        : [item.name, evaluationMetric(item.precision), evaluationMetric(item.recall), evaluationMetric(item.f1), evaluationMetric(item.support, false)];
+  return `<section class="card evaluation-section"><div class="evaluation-section-head"><div><span class="control-kicker">Class diagnostics</span><h3>Per-class metrics</h3></div><span>${rows.length} classes</span></div>
+    <table class="evaluation-class-table"><thead><tr>${headers.map((item) => `<th>${esc(item)}</th>`).join('')}</tr></thead><tbody>
+      ${rows.map((item) => `<tr>${cells(item).map((value, index) => `<td>${index === 0 ? `<strong>${esc(value)}</strong>` : esc(value)}</td>`).join('')}</tr>`).join('')}
+    </tbody></table></section>`;
+}
+
+function evaluationConfusionMatrix(record) {
+  const matrix = record.confusionMatrix || [];
+  if (!matrix.length || matrix.length > 30) return '';
+  const names = record.classes?.map((item) => item.name) || matrix.map((_, index) => String(index));
+  const maximum = Math.max(1, ...matrix.flat().map(Number));
+  return `<section class="card evaluation-section"><div class="evaluation-section-head"><div><span class="control-kicker">Error distribution</span><h3>Confusion matrix</h3></div><span>Rows: actual · columns: predicted</span></div>
+    <div class="evaluation-matrix-wrap"><table class="evaluation-matrix"><thead><tr><th></th>${names.map((name) => `<th title="${esc(name)}">${esc(name)}</th>`).join('')}</tr></thead><tbody>
+      ${matrix.map((row, rowIndex) => `<tr><th title="${esc(names[rowIndex] || rowIndex)}">${esc(names[rowIndex] || rowIndex)}</th>${row.map((value) => `<td style="--matrix-alpha:${Math.max(.05, Number(value) / maximum)}">${esc(value)}</td>`).join('')}</tr>`).join('')}
+    </tbody></table></div></section>`;
+}
+
+function evaluationDetail(record, spec) {
+  const cards = spec.cards.map(([key, label, percent = true]) => {
+    const value = evaluationValue(record, key);
+    return `<div><span>${esc(label)}</span><strong>${esc(evaluationMetric(value, percent))}</strong></div>`;
+  }).join('');
+  return `<section class="evaluation-detail" id="evaluation-detail">
+    <div class="evaluation-scope"><div><span class="control-kicker">Comparison scope locked</span><strong>Same dataset · same split</strong><small>${esc(record.dataset?.label || 'dataset')} · ${esc(record.dataset?.split || 'validation')}</small></div>
+      <div><span>Evaluated samples</span><strong>${esc(evaluationMetric(record.samples, false))}</strong><small>${esc(record.agentId || 'machine not recorded')}</small></div></div>
+    <div class="evaluation-model-head"><div><span class="control-kicker">Selected checkpoint</span><h3>${esc(record.checkpoint?.label || record.jobName)}</h3><p>${esc(record.architecture || familyLabel())}</p></div><a class="btn" href="#/job/${encodeURIComponent(record.jobId)}">Open evaluation job</a></div>
+    <div class="evaluation-kpis">${cards}</div>
+    ${evaluationClassTable(record)}${evaluationConfusionMatrix(record)}
+    <section class="evaluation-provenance">
+      <div><span>Dataset</span><strong>${esc(record.dataset?.label || '—')}</strong><small>${esc(record.dataset?.source || '—')}</small></div>
+      <div><span>Split</span><strong>${esc(record.dataset?.split || 'validation')}</strong><small>held constant in this ranking</small></div>
+      <div><span>Checkpoint</span><strong>${esc(record.checkpoint?.label || '—')}</strong><small>${esc(record.checkpoint?.source || '—')}</small></div>
+      <div><span>Completed</span><strong>${esc(fmtTime(record.endedAt))}</strong><small>${esc(record.agentId || 'machine not recorded')}</small></div>
+    </section>
+    <div class="evaluation-rule"><strong>Comparison rule</strong><span>Only checkpoints evaluated in the same evaluation scope are ranked together. Dataset and split must match exactly.</span></div>
+  </section>`;
+}
+
+async function renderEvaluations(main) {
+  const family = currentFamily();
+  const spec = evaluationSpec(family);
+  const actionLabel = family === 'vlm' ? 'VLM' : familyLabel();
+  main.innerHTML = `<div class="evaluation-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">${esc(spec.headline)}</h2><p class="page-sub">${esc(spec.subtitle)}</p></div><a class="btn primary" href="#/new/evaluate">Run ${esc(actionLabel)} evaluation</a></div>
+    <div class="card"><div class="muted">Loading evaluation jobs…</div></div>`;
+  const { evaluations } = await api(`/evaluations?family=${encodeURIComponent(family)}&limit=200`);
+  if (!evaluations.length) {
+    main.innerHTML = `<div class="evaluation-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">${esc(spec.headline)}</h2><p class="page-sub">${esc(spec.subtitle)}</p></div><a class="btn primary" href="#/new/evaluate">Run ${esc(actionLabel)} evaluation</a></div>
+      <div class="card evaluation-empty"><h3>No completed evaluations yet</h3><p>Run an evaluation for this model family. The result will appear here with its metrics and model-level diagnostics.</p><a class="btn" href="#/new/evaluate">Configure evaluation</a></div>`;
+    return;
+  }
+  const scopes = [...new Map(evaluations.map((record) => [record.dataset.key, record.dataset])).entries()];
+  let activeScope = scopes[0][0];
+  let selectedId = null;
+  main.innerHTML = `<div class="evaluation-head"><div><span class="control-kicker">${esc(familyLabel())}</span><h2 class="page-title">${esc(spec.headline)}</h2><p class="page-sub">${esc(spec.subtitle)}</p></div><a class="btn primary" href="#/new/evaluate">Run ${esc(actionLabel)} evaluation</a></div>
+    <section class="card evaluation-filter"><div><span class="control-kicker">Evaluation scope</span><h3>Evaluation run + dataset + split</h3></div><label class="field"><span>Dataset and split</span><select id="evaluation-scope">${scopes.map(([key, dataset]) => `<option value="${esc(key)}">${esc(dataset.label)} · ${esc(dataset.split)}</option>`).join('')}</select></label></section>
+    <div class="warn-banner">Training splits may differ. Only checkpoints evaluated against the same dataset and split are ranked together.</div>
+    <section class="card evaluation-leaderboard"><div class="evaluation-section-head"><div><span class="control-kicker">Comparable checkpoints</span><h3>Checkpoint leaderboard</h3></div><span id="evaluation-count"></span></div><div id="evaluation-table"></div></section>
+    <div id="evaluation-detail-root"></div>`;
+  const draw = () => {
+    const scoped = evaluations.filter((record) => record.dataset.key === activeScope).sort((left, right) => {
+      const leftValue = Number(left.primary?.value);
+      const rightValue = Number(right.primary?.value);
+      if (!Number.isFinite(leftValue)) return 1;
+      if (!Number.isFinite(rightValue)) return -1;
+      return left.primary?.direction === 'lower' ? leftValue - rightValue : rightValue - leftValue;
+    });
+    if (!scoped.some((record) => record.id === selectedId)) selectedId = scoped[0]?.id;
+    $('#evaluation-count').textContent = `${scoped.length} comparable checkpoint${scoped.length === 1 ? '' : 's'}`;
+    $('#evaluation-table').innerHTML = `<table><thead><tr><th>Rank</th><th>Checkpoint</th><th>Split</th><th>Samples</th>${spec.columns.map(([, label]) => `<th>${esc(label)}</th>`).join('')}<th>Completed</th></tr></thead><tbody>
+      ${scoped.map((record, index) => `<tr class="clickable evaluation-row ${record.id === selectedId ? 'selected' : ''}" data-id="${esc(record.id)}"><td><span class="evaluation-rank">${index + 1}</span></td><td><strong>${esc(record.checkpoint?.label || record.jobName)}</strong><br><span class="muted">${esc(record.architecture || record.jobName)}</span></td><td>${esc(record.dataset?.split || 'validation')}</td><td>${esc(evaluationMetric(record.samples, false))}</td>${spec.columns.map(([key, , percent = true]) => `<td>${esc(evaluationMetric(evaluationValue(record, key), percent))}</td>`).join('')}<td>${esc(fmtTime(record.endedAt))}</td></tr>`).join('')}
+      </tbody></table>`;
+    const selected = scoped.find((record) => record.id === selectedId) || scoped[0];
+    $('#evaluation-detail-root').innerHTML = selected ? evaluationDetail(selected, spec) : '';
+    $$('.evaluation-row').forEach((row) => row.addEventListener('click', () => {
+      selectedId = row.dataset.id; draw(); $('#evaluation-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }));
+  };
+  $('#evaluation-scope').addEventListener('change', (event) => { activeScope = event.target.value; selectedId = null; draw(); });
+  draw();
+}
+
 async function renderHistory(main) {
   const [{ jobs }, { runs }] = await Promise.all([api('/jobs?limit=500'), api('/runs?limit=1000')]);
   const artifactPaths = new Set(jobs.flatMap((job) => job.artifacts || []).map(String));
@@ -1189,7 +1459,8 @@ async function route() {
   $$('.sidebar nav a').forEach((link) => link.classList.toggle('active', link.dataset.nav === view));
   const main = $('#main');
   try {
-    if (view === 'new') return await renderNew(main);
+    if (view === 'new') return await renderNew(main, argument);
+    if (view === 'evaluations') return await renderEvaluations(main);
     if (view === 'export') return await renderExport(main);
     if (view === 'models') return await renderModels(main);
     if (view === 'evidence') return await renderEvidence(main);

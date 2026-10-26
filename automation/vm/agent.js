@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { discoverRuns } from '../server/runs.js';
+import { datasetProfileFromJob } from '../server/dataset-profiles.js';
+import { evaluationFromJob } from '../server/evaluations.js';
 
 const env = process.env;
 const controlUrl = String(env.CONTROL_PLANE_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
@@ -270,7 +272,11 @@ async function runJob(job) {
     }
     await pushLog(job.id, ['[agent] job completed']);
     // Terminal status may trigger VM deallocation, so upload the final log first.
-    await update(job.id, { status: 'completed', artifacts });
+    const completed = { ...job, status: 'completed', artifacts, endedAt: Date.now(), agentId };
+    const evaluation = evaluationFromJob(completed);
+    const datasetProfile = datasetProfileFromJob(completed);
+    await update(job.id, { status: 'completed', artifacts,
+      ...(evaluation ? { evaluation } : {}), ...(datasetProfile ? { datasetProfile } : {}) });
   } catch (error) {
     const status = cancelled.has(job.id) ? 'cancelled' : 'failed';
     await pushLog(job.id, [`[agent] ${status}: ${error.message || error}`]);

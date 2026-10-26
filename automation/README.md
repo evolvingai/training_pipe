@@ -20,7 +20,7 @@ the same plugin registry.
   tuning, augmentation preview, data benchmark, and ONNX/TensorRT export.
 - Recipes for video/action train, evaluate, predict, and ONNX/TensorRT export. The
   baseline uses a frame encoder plus GRU and can run on CPU.
-- VLM multimodal JSONL validation, PEFT LoRA tuning, adapter artifacts,
+- VLM multimodal JSONL validation, PEFT LoRA tuning and evaluation, adapter artifacts,
   adapter-to-base-model merge, and fixed-shape ONNX/TensorRT forward export.
 - CPU, CUDA, Apple MPS, and auto device selection. A CPU-only agent will not
   claim a job that explicitly requests CUDA.
@@ -47,6 +47,15 @@ the same plugin registry.
   The xAI page also has a selected-sample workflow: upload one test image, choose
   its checkpoint and CPU/GPU target, and keep the prediction, confidence, signed
   map, and feature activations together in the page.
+- A family-aware Evaluations workspace for detection, image classification,
+  video/action classification, and VLM checkpoints. Leaderboards compare only
+  jobs with the exact same dataset and split, then show the metrics appropriate
+  to that family, per-class diagnostics, and confusion matrices where applicable.
+- A family-aware Dataset Explorer for COCO and custom datasets. COCO annotation
+  JSON/root paths and custom YOLO TOML, image folders, video folders, or VLM
+  JSONL are profiled on the selected VM and shown through the same sample/split,
+  class-distribution, missing-label, invalid-record, and quality visualizations.
+  Raw dataset files are not copied into or exposed by the control plane.
 
 The control plane creates fixed argument arrays. The agent uses `spawn()` with
 `shell: false`; job parameters are never evaluated by a shell.
@@ -128,7 +137,24 @@ docker run --rm -p 8080:8080 -v trainer-automation-data:/data \
 
 ## Classifier datasets
 
-The bundled classifier accepts either explicit splits:
+The bundled classifier supports both target contracts. For multi-label scene
+classification, point `data` at a COCO instances JSON or at a COCO root:
+
+```text
+coco/
+├── annotations/
+│   ├── instances_train2017.json
+│   └── instances_val2017.json
+├── train2017/*.jpg
+└── val2017/*.jpg
+```
+
+Every unique category present in an image becomes one positive target. Multiple
+instances of the same category still count once. Training uses sigmoid with
+binary cross entropy; evaluation reports mAP, micro/macro F1, exact-match
+accuracy, per-class AP, and tunable per-class thresholds.
+
+For single-label classification, explicit class-folder splits remain supported:
 
 ```text
 dataset/
@@ -151,8 +177,9 @@ dataset/
 A classifier run writes EMA-backed checkpoints under `weights/`, tracker and
 history CSVs under `logs/`, curves/confusion matrices under `plots/`, and an
 HTML report under `reports/`. Checkpoints include raw and EMA weights,
-optimizer/scheduler/scaler state, class names, input size, architecture, and
-metrics so a run can resume exactly. Evaluation also writes per-image metrics
+optimizer/scheduler/scaler state, class names, input size, architecture, metrics,
+and the single-label or multi-label activation contract so a run can resume
+exactly. Evaluation also writes per-image metrics
 and optimized class thresholds; prediction supports top-k output and threshold
 rejection. Export writes a dynamic-batch ONNX graph and JSON preprocessing,
 class, and tensor contract. TensorRT export retains the ONNX intermediate and
@@ -199,6 +226,18 @@ writes `adapter/`, `run.json`, and `metrics.json`. The Export page merges that
 adapter with its base model when a standalone model directory is needed. VLM
 ONNX/TensorRT export traces the selected sample image and prompt as a fixed-shape
 forward-logits contract; autoregressive decoding remains a serving-runtime concern.
+The Evaluate action scores a base model or LoRA adapter against an explicit JSONL
+set and reports loss, perplexity, answer-token accuracy, sample count, and evaluated
+token count in the Evaluations workspace.
+
+## Dataset progression
+
+The Data page keeps a family-specific shortlist next to the profiler. Use COCO
+2017 val/train for detection and multi-label image classification, UCF101 for
+the first video/action smoke test before scaling to Kinetics-400, and COCO
+Captions for the first VLM ingestion/tuning smoke before conversational tuning
+with LLaVA-Instruct-150K. These are recommendations, not automatic downloads;
+the worker profiles the exact local path chosen for a run.
 
 ## VM deployment
 

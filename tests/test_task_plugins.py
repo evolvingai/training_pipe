@@ -18,6 +18,7 @@ def test_builtin_tasks_and_architectures_are_registered() -> None:
     assert {"tiny-vlm-lora", "hf-lora"} <= set(architectures.names("vlm"))
     assert {"finetune", "tune", "tune-thresh", "report", "viz-augment", "bench-data"} <= \
         set(tasks.get("classification").actions)
+    assert {"evaluate", "val"} <= set(tasks.get("vlm").actions)
 
 
 def test_architecture_registry_accepts_a_runtime_plugin() -> None:

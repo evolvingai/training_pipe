@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""LoRA tuning and adapter merge workflow for image-text VLMs.
+"""LoRA tuning, evaluation, and adapter merge workflow for image-text VLMs.
 
-The optional ``vlm`` dependency group is imported only when a tuning or merge
+The optional ``vlm`` dependency group is imported only when a tuning, evaluation, or merge
 job runs, so detection and classification agents stay lightweight.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 from dataclasses import dataclass
@@ -249,6 +250,57 @@ def tune(args: argparse.Namespace) -> int:
     return 0
 
 
+def evaluate(args: argparse.Namespace) -> int:
+    torch, Image, _, PeftModel, _, AutoProcessor, AutoVLM = require_vlm_dependencies()
+    from torch.utils.data import DataLoader
+
+    records = load_records(Path(args.data), args.max_samples)
+    device = select_device(torch, args.device); dtype = dtype_for(torch, args.dtype, device)
+    print(f"loading VLM {args.model} on {device} with {dtype}; evaluating {len(records)} examples")
+    processor_source = args.adapter or args.model
+    try:
+        processor = AutoProcessor.from_pretrained(processor_source, trust_remote_code=args.trust_remote_code)
+    except (OSError, ValueError):
+        processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+    model = AutoVLM.from_pretrained(args.model, torch_dtype=dtype, trust_remote_code=args.trust_remote_code)
+    if args.adapter:
+        adapter = Path(args.adapter)
+        if not (adapter / "adapter_config.json").is_file():
+            raise FileNotFoundError(f"PEFT adapter_config.json is missing under {adapter}")
+        model = PeftModel.from_pretrained(model, adapter)
+    model = model.to(device); model.eval()
+    collator = VLMCollator(processor, Image, torch, args.max_length)
+    loader = DataLoader(records, batch_size=args.batch, shuffle=False, collate_fn=collator)
+    loss_sum, evaluated_tokens, correct_tokens = 0.0, 0, 0
+    with torch.no_grad():
+        for step, batch in enumerate(loader, 1):
+            batch = {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}
+            amp_enabled = device.type == "cuda" and dtype in {torch.float16, torch.bfloat16}
+            with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
+                output = model(**batch)
+            labels = batch["labels"][:, 1:]
+            predictions = output.logits[:, :-1].argmax(-1)
+            mask = labels.ne(-100)
+            tokens = int(mask.sum().item())
+            evaluated_tokens += tokens
+            correct_tokens += int((predictions.eq(labels) & mask).sum().item())
+            loss_sum += float(output.loss.detach()) * tokens
+            print(f"evaluation batch {step}/{len(loader)} loss={float(output.loss.detach()):.4f}")
+    if not evaluated_tokens:
+        raise ValueError("VLM evaluation produced no answer tokens; increase max-length or check the answers")
+    loss = loss_sum / evaluated_tokens
+    metrics = {
+        "model": args.model, "adapter": args.adapter or None, "samples": len(records),
+        "evaluated_tokens": evaluated_tokens, "loss": loss,
+        "perplexity": math.exp(min(loss, 30.0)),
+        "token_accuracy": correct_tokens / max(evaluated_tokens, 1),
+    }
+    output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
+    save_json(output / "metrics.json", metrics)
+    print(f"VLM evaluation: loss={loss:.4f} token_accuracy={metrics['token_accuracy']:.4f}")
+    return 0
+
+
 def merge(args: argparse.Namespace) -> int:
     torch, _, _, PeftModel, _, AutoProcessor, AutoVLM = require_vlm_dependencies()
     device = select_device(torch, args.device); dtype = dtype_for(torch, args.dtype, device)
@@ -274,7 +326,7 @@ def common_model_options(command_parser: argparse.ArgumentParser) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Trainer VLM LoRA tuning and adapter merge")
+    root = argparse.ArgumentParser(description="Trainer VLM LoRA tuning, evaluation, and adapter merge")
     sub = root.add_subparsers(dest="command", required=True)
     tune_parser = sub.add_parser("tune"); common_model_options(tune_parser)
     tune_parser.add_argument("--data", required=True); tune_parser.add_argument("--output", required=True)
@@ -290,6 +342,11 @@ def parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--max-grad-norm", type=float, default=1.0); tune_parser.add_argument("--log-every", type=int, default=10)
     tune_parser.add_argument("--seed", type=int, default=0)
     add_augmentation_arguments(tune_parser)
+    evaluate_parser = sub.add_parser("evaluate"); common_model_options(evaluate_parser)
+    evaluate_parser.add_argument("--data", required=True); evaluate_parser.add_argument("--output", required=True)
+    evaluate_parser.add_argument("--adapter", default=""); evaluate_parser.add_argument("--batch", type=int, default=1)
+    evaluate_parser.add_argument("--max-length", type=int, default=1024)
+    evaluate_parser.add_argument("--max-samples", type=int, default=1000)
     merge_parser = sub.add_parser("merge"); common_model_options(merge_parser)
     merge_parser.add_argument("--adapter", required=True); merge_parser.add_argument("--output", required=True)
     return root
@@ -301,7 +358,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         if hasattr(args, key) and getattr(args, key) < 1:
             raise ValueError(f"{key.replace('_', '-')} must be positive")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    return tune(args) if args.command == "tune" else merge(args)
+    if args.command == "tune":
+        return tune(args)
+    if args.command == "evaluate":
+        return evaluate(args)
+    return merge(args)
 
 
 if __name__ == "__main__":

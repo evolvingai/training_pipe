@@ -102,12 +102,14 @@ function appendAugmentation(argv, p) {
 }
 
 export const recipeCatalog = [
+  { type: 'detect_dataset_profile', label: 'Detector · profile COCO/custom dataset', fields: ['data', 'project'] },
   { type: 'detect_train', label: 'Detector · train', fields: ['data', 'model', 'epochs', 'batch', 'imgsz', 'device', 'project'] },
   { type: 'detect_finetune', label: 'Detector · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'freeze', 'device', 'project'] },
   { type: 'detect_evaluate', label: 'Detector · evaluate/report', fields: ['data', 'checkpoint', 'device', 'project'] },
   { type: 'detect_predict', label: 'Detector · predict', fields: ['source', 'checkpoint', 'conf', 'device', 'project'] },
   { type: 'detect_export', label: 'Detector · export ONNX / TensorRT', fields: ['checkpoint', 'format', 'imgsz', 'device'] },
   { type: 'detect_tune', label: 'Detector · tune', fields: ['data', 'model', 'iterations', 'device', 'project'] },
+  { type: 'classifier_dataset_profile', label: 'Classifier · profile dataset', fields: ['data', 'project'] },
   { type: 'classifier_train', label: 'Classifier · train', fields: ['data', 'arch', 'epochs', 'batch', 'imgsz', 'device', 'project'] },
   { type: 'classifier_finetune', label: 'Classifier · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'freeze', 'device', 'project'] },
   { type: 'classifier_evaluate', label: 'Classifier · evaluate/report', fields: ['data', 'checkpoint', 'batch', 'device', 'project'] },
@@ -119,11 +121,14 @@ export const recipeCatalog = [
   { type: 'classifier_report', label: 'Classifier · report', fields: ['data', 'checkpoint', 'thresholds', 'device', 'project'] },
   { type: 'classifier_viz-augment', label: 'Classifier · augmentation preview', fields: ['data', 'imgsz', 'device', 'project'] },
   { type: 'classifier_bench-data', label: 'Classifier · benchmark data', fields: ['data', 'batch', 'imgsz', 'device', 'project'] },
+  { type: 'video_dataset_profile', label: 'Video/action · profile dataset', fields: ['data', 'project'] },
   { type: 'video_train', label: 'Video/action · train', fields: ['data', 'arch', 'epochs', 'batch', 'imgsz', 'clipLen', 'device', 'project'] },
   { type: 'video_evaluate', label: 'Video/action · evaluate', fields: ['data', 'checkpoint', 'batch', 'device', 'project'] },
   { type: 'video_predict', label: 'Video/action · predict', fields: ['source', 'checkpoint', 'batch', 'device', 'project'] },
   { type: 'video_export', label: 'Video/action · export ONNX / TensorRT', fields: ['checkpoint', 'format', 'device', 'project'] },
+  { type: 'vlm_dataset_profile', label: 'VLM · profile dataset', fields: ['data', 'project'] },
   { type: 'vlm_tune', label: 'VLM · LoRA tune', fields: ['data', 'arch', 'model', 'epochs', 'batch', 'lr', 'loraR', 'device', 'project'] },
+  { type: 'vlm_evaluate', label: 'VLM · evaluate', fields: ['data', 'model', 'adapter', 'batch', 'device', 'project'] },
   { type: 'vlm_merge', label: 'VLM · merge adapter', fields: ['model', 'adapter', 'device', 'project'] },
   { type: 'vlm_export', label: 'VLM · export ONNX / TensorRT', fields: ['model', 'adapter', 'format', 'device', 'project'] },
 ];
@@ -138,7 +143,19 @@ export function buildRecipe(type, input = {}, defaults) {
   let commands;
   let artifacts = [];
 
-  if (type === 'detect_train' || type === 'detect_finetune') {
+  const datasetProfileFamily = {
+    detect_dataset_profile: 'detection', classifier_dataset_profile: 'classification',
+    video_dataset_profile: 'video', vlm_dataset_profile: 'vlm',
+  }[type];
+
+  if (datasetProfileFamily) {
+    const output = runDir(project, jobName, cwd);
+    commands = [command('profile-dataset', `Profile ${datasetProfileFamily} dataset`, cwd, [
+      python, path.join(cwd, 'automation', 'dataset_profile.py'), '--family', datasetProfileFamily,
+      '--data', text(p.data, 'data'), '--output', path.join(output, 'dataset-profile.json'),
+    ])];
+    artifacts = [output];
+  } else if (type === 'detect_train' || type === 'detect_finetune') {
     const data = text(p.data, 'data');
     const action = type === 'detect_train' ? 'train' : 'finetune';
     const selectedModel = type === 'detect_train' ? model(p.model) : text(p.checkpoint, 'checkpoint');
@@ -162,7 +179,9 @@ export function buildRecipe(type, input = {}, defaults) {
     const checkpoint = text(p.checkpoint, 'checkpoint');
     const reportDir = runDir(project, jobName, cwd);
     commands = [
-      detector(python, cwd, 'validate', 'Validate detector', 'val', { data, model: checkpoint, device: selectedDevice }),
+      detector(python, cwd, 'validate', 'Validate detector', 'val', {
+        data, model: checkpoint, device: selectedDevice, project, name: jobName, exist_ok: true,
+      }),
       detector(python, cwd, 'report', 'Build evaluation report', 'report', {
         data, model: checkpoint, device: selectedDevice, run_dir: reportDir,
       }),
@@ -355,6 +374,20 @@ export function buildRecipe(type, input = {}, defaults) {
     if (p.trustRemoteCode) argv.push('trust_remote_code=true');
     commands = [command('tune', 'Tune VLM with LoRA', cwd, argv)];
     artifacts = [output, path.join(output, 'adapter')];
+  } else if (type === 'vlm_evaluate') {
+    const output = runDir(project, jobName, cwd);
+    const argv = [
+      python, '-m', 'trainer', 'evaluate', 'task=vlm', `data=${text(p.data, 'data')}`,
+      `model=${text(p.model, 'model')}`, `project=${project}`, `name=${jobName}`,
+      `device=${selectedDevice || 'auto'}`, `dtype=${dtype(p.dtype)}`,
+      `batch=${integer(p.batch, 'batch', 1, 1, 128)}`,
+      `max_length=${integer(p.maxLength, 'maxLength', 1024, 32, 32768)}`,
+      `max_samples=${integer(p.maxSamples, 'maxSamples', 1000, 1, 1_000_000)}`,
+    ];
+    if (p.adapter) argv.push(`adapter=${text(p.adapter, 'adapter')}`);
+    if (p.trustRemoteCode) argv.push('trust_remote_code=true');
+    commands = [command('evaluate', 'Evaluate VLM checkpoint', cwd, argv)];
+    artifacts = [output];
   } else if (type === 'vlm_merge') {
     const output = runDir(project, jobName, cwd);
     const argv = [
