@@ -390,9 +390,10 @@ function detectionForm(mode, datasets = []) {
   };
   let body = '';
   const experimentFields = `<details class="adv"><summary>Detector optimizer, resume and distillation</summary>
-    <p class="muted">Latest detector controls from the integrated <code>cristina/parms_fixes</code> implementation. Defaults preserve the standard recipe.</p>
+    <p class="muted">Advanced detector controls. Defaults are safe for the selected compute target.</p>
     <div class="adv-grid">
       <label class="field"><span>Optimizer</span><select name="optimizer"><option value="auto">Auto</option><option value="sgd">SGD</option><option value="adamw">AdamW</option><option value="musgd">MuSGD</option></select></label>
+      <label class="field"><span>torch.compile</span><select name="compileMode"><option value="auto">Auto (GPU on, CPU off)</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
       ${field('resume', 'Resume checkpoint', { placeholder: '/runs/experiment/weights/last.pt' })}
       <label class="field"><span>Resume mode</span><select name="resumeMode"><option value="exact">Exact</option><option value="continue">Continue with changed horizon/LR</option><option value="branch">Controlled branch</option></select></label>
       ${field('regMax', 'DFL bins', { value: '16', type: 'number', min: 2 })}
@@ -432,6 +433,7 @@ function detectionForm(mode, datasets = []) {
       ${field('epochs', 'Epochs', { value: '100', type: 'number', min: 1 })}
       ${field('batch', 'Batch size', { value: '2', type: 'number', min: 1 })}
       ${field('imgsz', 'Image size', { value: '320', type: 'number', min: 32 })}
+      ${field('workers', 'Data-loader workers', { value: '2', type: 'number', min: 0 })}
     </div></div>${experimentFields}`;
   if (mode === 'finetune') body = `<div class="card"><h3>Checkpoint and dataset</h3>
     ${field('checkpoint', 'Source checkpoint', { placeholder: '/runs/base/weights/best.pt', required: true })}
@@ -440,6 +442,7 @@ function detectionForm(mode, datasets = []) {
       ${field('epochs', 'Epochs', { value: '30', type: 'number', min: 1 })}
       ${field('batch', 'Batch size', { value: '2', type: 'number', min: 1 })}
       ${field('imgsz', 'Image size', { value: '320', type: 'number', min: 32 })}
+      ${field('workers', 'Data-loader workers', { value: '2', type: 'number', min: 0 })}
       ${field('freeze', 'Freeze first N modules', { value: '10', type: 'number', min: 0 })}
     </div></div>${experimentFields}`;
   if (mode === 'evaluate') body = `<div class="card"><h3>Evaluation inputs</h3>

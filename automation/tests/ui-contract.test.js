@@ -50,6 +50,8 @@ test('all four Trainer families expose independent workflows', () => {
   assert.match(app, /Detector optimizer, resume and distillation/);
   assert.match(app, /MuSGD experiments/);
   assert.match(app, /Checkpoint weights/);
+  assert.match(app, /Data-loader workers/);
+  assert.match(app, /Auto \(GPU on, CPU off\)/);
 });
 
 test('every family uses the structured evaluation workspace', () => {

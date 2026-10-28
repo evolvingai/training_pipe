@@ -13,6 +13,8 @@ test('CPU detector recipe produces an exact, shell-free command', () => {
   assert.deepEqual(recipe.commands[0].argv.slice(0, 4), ['/venv/bin/python', '-m', 'trainer', 'train']);
   assert.ok(recipe.commands[0].argv.includes('device=cpu'));
   assert.ok(recipe.commands[0].argv.includes('batch=2'));
+  assert.ok(recipe.commands[0].argv.includes('workers=2'));
+  assert.ok(recipe.commands[0].argv.includes('compile=false'));
   assert.equal(recipe.commands[0].argv.some((part) => part === ';'), false);
 });
 
@@ -41,6 +43,17 @@ test('CUDA jobs preserve explicit device and larger defaults', () => {
   assert.ok(recipe.commands[0].argv.includes('device=cuda:1'));
   assert.ok(recipe.commands[0].argv.includes('batch=16'));
   assert.ok(recipe.commands[0].argv.includes('imgsz=640'));
+  assert.ok(recipe.commands[0].argv.includes('workers=8'));
+  assert.ok(recipe.commands[0].argv.includes('compile=true'));
+});
+
+test('detector compile and worker defaults can be overridden explicitly', () => {
+  const recipe = buildRecipe('detect_train', {
+    name: 'gpu-debug', data: '/data/dataset.toml', model: 'trainer-n', device: 'cuda:0',
+    compileMode: 'disabled', workers: 3,
+  }, defaults);
+  assert.ok(recipe.commands[0].argv.includes('compile=false'));
+  assert.ok(recipe.commands[0].argv.includes('workers=3'));
 });
 
 test('latest detector architectures and experiment controls are passed through', () => {

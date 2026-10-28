@@ -153,8 +153,8 @@ function detectorExperimentValues(p) {
 
 export const recipeCatalog = [
   { type: 'detect_dataset_profile', label: 'Detector · profile COCO/custom dataset', fields: ['data', 'project'] },
-  { type: 'detect_train', label: 'Detector · train', fields: ['data', 'model', 'epochs', 'batch', 'imgsz', 'device', 'project'] },
-  { type: 'detect_finetune', label: 'Detector · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'freeze', 'device', 'project'] },
+  { type: 'detect_train', label: 'Detector · train', fields: ['data', 'model', 'epochs', 'batch', 'imgsz', 'workers', 'device', 'project'] },
+  { type: 'detect_finetune', label: 'Detector · finetune', fields: ['data', 'checkpoint', 'epochs', 'batch', 'imgsz', 'workers', 'freeze', 'device', 'project'] },
   { type: 'detect_evaluate', label: 'Detector · evaluate/report', fields: ['data', 'checkpoint', 'device', 'project'] },
   { type: 'detect_predict', label: 'Detector · predict', fields: ['source', 'checkpoint', 'conf', 'device', 'project'] },
   { type: 'detect_export', label: 'Detector · export ONNX / TensorRT', fields: ['checkpoint', 'format', 'imgsz', 'device'] },
@@ -209,12 +209,16 @@ export function buildRecipe(type, input = {}, defaults) {
     const data = text(p.data, 'data');
     const action = type === 'detect_train' ? 'train' : 'finetune';
     const selectedModel = type === 'detect_train' ? model(p.model) : text(p.checkpoint, 'checkpoint');
+    const gpuSelected = selectedDevice.startsWith('cuda');
+    const compileMode = choice(p.compileMode || 'auto', 'compileMode', ['auto', 'enabled', 'disabled']);
     const values = {
       data,
       model: selectedModel,
       epochs: integer(p.epochs, 'epochs', 100, 1, 10000),
-      batch: integer(p.batch, 'batch', selectedDevice === 'cpu' ? 2 : 16, 1, 4096),
-      imgsz: integer(p.imgsz, 'imgsz', selectedDevice === 'cpu' ? 320 : 640, 32, 4096),
+      batch: integer(p.batch, 'batch', gpuSelected ? 16 : 2, 1, 4096),
+      imgsz: integer(p.imgsz, 'imgsz', gpuSelected ? 640 : 320, 32, 4096),
+      workers: integer(p.workers, 'workers', gpuSelected ? 8 : 2, 0, 128),
+      compile: compileMode === 'enabled' || (compileMode === 'auto' && gpuSelected),
       device: selectedDevice,
       project,
       name: jobName,
