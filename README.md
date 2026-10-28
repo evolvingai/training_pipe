@@ -59,6 +59,31 @@ architecture from a module or Python package entry point.
 - **Strict configuration.** All hyperparameters live in `trainer/detection/cfg/default.toml` and are overridable as CLI `key=value` args or Python kwargs. Unknown keys raise immediately so typos never silently no-op.
 - **Evaluation over training.** Validation produces COCO-protocol mAP (AP50, AP50-95), a per-image/per-class TP/FP/FN/TN breakdown, and a full false-positive detail log — enough to diagnose class confusion and coverage gaps without leaving the framework.
 
+### Latest detector integration
+
+The detector package is synchronized with detector commit `f4914b0` from the
+`cristina/parms_fixes` line and remains exposed only through the Trainer
+namespace. In addition to the standard, CSP, and FPN variants, Trainer now
+registers the P2 small-object and legacy comparison architectures. The detector
+also includes exact/continue/branch resume semantics, MuSGD experiments,
+teacher/student feature, class-logit, and box-distribution distillation,
+provenance manifests, step profiling, corrected COCO metrics/NMS, and raw-vs-EMA
+evaluation selection.
+
+```bash
+# small-object architecture
+trainer train task=detection model=trainer-p2-n data=dataset.toml
+
+# MuSGD experiment
+trainer train task=detection model=trainer-n data=dataset.toml \
+  optimizer=musgd muon_weight=0.2 sgd_weight=1.0
+
+# frozen teacher distillation
+trainer train task=detection model=trainer-n data=dataset.toml \
+  teacher=/runs/teacher/weights/best.pt \
+  distill_feature_weight=1.0 distill_cls_weight=0.5
+```
+
 ## Architecture
 
 Attention-centric detector: **R-ELAN** (residual efficient layer aggregation) blocks in the backbone, an **A2Block** (area attention) bottleneck in the neck, and an anchor-free decoupled head with **DFL** (distribution focal loss) box regression. Three built-in neck variants: standard FPN, CSP-FPN, and the default ELAN-neck.
@@ -108,7 +133,7 @@ Labels: one `.txt` per image (`labels/` mirrors `images/`), lines of `cls cx cy 
 ### CLI
 
 ```bash
-# train (model scales: trainer-{n,s,m,l,x}; variants: trainer-csp, trainer-fpn)
+# train (model scales: trainer-{n,s,m,l,x}; variants: trainer-csp, trainer-fpn, trainer-p2, trainer-legacy)
 trainer train data=dataset.toml model=trainer-s epochs=100 batch=16 imgsz=640
 
 # evaluate

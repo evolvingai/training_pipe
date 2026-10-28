@@ -120,5 +120,6 @@ def make_anchors(feats: list[torch.Tensor], strides, grid_cell_offset: float = 0
         sy = torch.arange(h, device=device, dtype=dtype) + grid_cell_offset
         sy, sx = torch.meshgrid(sy, sx, indexing="ij")
         anchor_points.append(torch.stack((sx, sy), -1).view(-1, 2))
-        stride_tensor.append(torch.full((h * w, 1), float(stride), dtype=dtype, device=device))
+        stride_value = stride.to(device=device, dtype=dtype) if torch.is_tensor(stride) else stride
+        stride_tensor.append(torch.ones((h * w, 1), dtype=dtype, device=device) * stride_value)
     return torch.cat(anchor_points), torch.cat(stride_tensor)

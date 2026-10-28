@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 const DEVICES = /^(auto|cpu|mps|cuda(?::\d+)?)$/;
-const MODEL_NAMES = /^(?:trainer(?:-(?:n|s|m|l|x))?|trainer-(?:csp|fpn)(?:-(?:n|s|m|l|x))?)$/;
+const MODEL_NAMES = /^(?:trainer(?:-(?:n|s|m|l|x))?|trainer-(?:csp|fpn|p2|legacy)(?:-(?:n|s|m|l|x))?)$/;
 
 function text(value, name, { required = true, max = 500 } = {}) {
   const result = String(value ?? '').trim();
@@ -101,6 +101,56 @@ function appendAugmentation(argv, p) {
   }
 }
 
+function choice(value, field, allowed) {
+  const result = text(value, field).toLowerCase();
+  if (!allowed.includes(result)) throw new Error(`${field} must be one of: ${allowed.join(', ')}`);
+  return result;
+}
+
+function enabled(value) {
+  return value === true || value === 'on' || String(value).toLowerCase() === 'true';
+}
+
+function detectorExperimentValues(p) {
+  const values = {};
+  if (p.optimizer) values.optimizer = choice(p.optimizer, 'optimizer', ['auto', 'sgd', 'adamw', 'musgd']);
+  if (p.resume) values.resume = text(p.resume, 'resume');
+  if (p.resumeMode) values.resume_mode = choice(p.resumeMode, 'resumeMode', ['exact', 'continue', 'branch']);
+  if (p.regMax !== undefined && p.regMax !== '') values.reg_max = integer(p.regMax, 'regMax', 16, 2, 256);
+  if (p.regChannels !== undefined && p.regChannels !== '') {
+    values.reg_channels = integer(p.regChannels, 'regChannels', 0, 0, 65536);
+  }
+  if (p.assignmentMetric) {
+    values.assignment_metric = choice(p.assignmentMetric, 'assignmentMetric', ['iou', 'ciou']);
+  }
+  if (p.teacher) values.teacher = text(p.teacher, 'teacher');
+  const gains = {
+    distillFeatureWeight: 'distill_feature_weight', distillClsWeight: 'distill_cls_weight',
+    distillBoxWeight: 'distill_box_weight', distillTemperature: 'distill_temperature',
+    muonWeight: 'muon_weight', sgdWeight: 'sgd_weight', muonBeta: 'muon_beta',
+  };
+  for (const [field, key] of Object.entries(gains)) {
+    if (p[field] !== undefined && p[field] !== '') values[key] = number(p[field], field, 0, field === 'muonBeta' ? -1 : 0, 1000);
+  }
+  if (p.muonNsSteps !== undefined && p.muonNsSteps !== '') {
+    values.muon_ns_steps = integer(p.muonNsSteps, 'muonNsSteps', 5, 1, 100);
+  }
+  if (p.muonSchedule) values.muon_schedule = choice(p.muonSchedule, 'muonSchedule', ['constant', 'linear']);
+  if (p.muonTaperStart !== undefined && p.muonTaperStart !== '') {
+    values.muon_taper_start = integer(p.muonTaperStart, 'muonTaperStart', 300, 0, 100000);
+  }
+  if (p.muonTaperEnd !== undefined && p.muonTaperEnd !== '') {
+    values.muon_taper_end = integer(p.muonTaperEnd, 'muonTaperEnd', 400, 1, 100000);
+  }
+  const flags = {
+    muonBatchNs: 'muon_batch_ns', muonExcludeOutputs: 'muon_exclude_outputs',
+    muonExcludeStem: 'muon_exclude_stem', muonExcludeDepthwise: 'muon_exclude_depthwise',
+    muonSplitQkv: 'muon_split_qkv', profile: 'profile', lossDiagnostics: 'loss_diagnostics',
+  };
+  for (const [field, key] of Object.entries(flags)) if (enabled(p[field])) values[key] = true;
+  return values;
+}
+
 export const recipeCatalog = [
   { type: 'detect_dataset_profile', label: 'Detector · profile COCO/custom dataset', fields: ['data', 'project'] },
   { type: 'detect_train', label: 'Detector · train', fields: ['data', 'model', 'epochs', 'batch', 'imgsz', 'device', 'project'] },
@@ -169,6 +219,7 @@ export function buildRecipe(type, input = {}, defaults) {
       project,
       name: jobName,
       exist_ok: true,
+      ...detectorExperimentValues(p),
       ...augmentationValues(p),
     };
     if (type === 'detect_finetune') values.freeze = integer(p.freeze, 'freeze', 10, 0, 1000);
@@ -181,6 +232,8 @@ export function buildRecipe(type, input = {}, defaults) {
     commands = [
       detector(python, cwd, 'validate', 'Validate detector', 'val', {
         data, model: checkpoint, device: selectedDevice, project, name: jobName, exist_ok: true,
+        ...(p.evalWeights ? { eval_weights: choice(p.evalWeights, 'evalWeights', ['ema', 'raw']) } : {}),
+        ...(enabled(p.nmsMultiLabel) ? { nms_multi_label: true } : {}),
       }),
       detector(python, cwd, 'report', 'Build evaluation report', 'report', {
         data, model: checkpoint, device: selectedDevice, run_dir: reportDir,

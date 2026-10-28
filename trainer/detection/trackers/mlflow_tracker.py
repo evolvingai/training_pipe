@@ -10,19 +10,23 @@ from trainer.detection.utils.logging import LOGGER
 
 class MLflowTracker(Tracker):
     def __init__(self, experiment: str = "trainer", run_name: str = "exp",
-                 tracking_uri: str = "", nested: bool = False):
+                 tracking_uri: str = "", nested: bool = False, run_id: str | None = None):
         import mlflow  # deferred: optional dependency
 
         self._mlflow = mlflow
         if tracking_uri:
             mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment)
-        self._run = mlflow.start_run(run_name=run_name, nested=nested)
-        LOGGER.info(f"mlflow run_id: {self._run.info.run_id}")
-        LOGGER.info(f"mlflow run name: {run_name}")
-        LOGGER.info(f"mlflow epxeriment: {experiment}")
-        LOGGER.info(f"Mlflow is succesfully initialized.")
-
+        if run_id:
+            # resume: reattach to the existing run instead of creating a new one
+            self._run = mlflow.start_run(run_id=run_id)
+            LOGGER.info(f"mlflow resumed run_id: {run_id}")
+        else:
+            self._run = mlflow.start_run(run_name=run_name, nested=nested)
+            LOGGER.info(f"mlflow run_id: {self._run.info.run_id}")
+            LOGGER.info(f"mlflow run name: {run_name}")
+        LOGGER.info(f"mlflow experiment: {experiment}")
+        LOGGER.info("MLflow initialized successfully")
 
     @property
     def run_id(self) -> str | None:

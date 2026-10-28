@@ -1,7 +1,7 @@
-"""Detector CLI used by the Trainer platform.
+"""CLI: trainer <command> [key=value ...]
 
 Commands: train, val, predict, finetune, export, tune, tune-thresh, report,
-viz-augment, bench-data, version.
+viz-augment, bench-data, bench-model, version.
 """
 
 from __future__ import annotations
@@ -13,23 +13,24 @@ from trainer.detection.config import load_config, load_toml
 from trainer.detection.utils.logging import LOGGER
 
 COMMANDS = ("train", "val", "predict", "finetune", "export", "tune", "tune-thresh",
-            "report", "viz-augment", "bench-data", "version", "help")
+            "report", "viz-augment", "bench-data", "bench-model", "version", "help")
 
-USAGE = """Trainer - detection, classification, action, and VLM training platform
+USAGE = """trainer - in-house real-time detection training framework
 
 usage: trainer <command> [key=value ...]
 
 commands:
-  train        train a detector            trainer train data=ds.toml model=trainer-n epochs=100
-  val          evaluate a checkpoint       trainer val model=runs/exp/weights/best.pt data=ds.toml
-  predict      run inference               trainer predict model=weights/best.pt source=images/ conf=0.4
-  finetune     transfer-learn              trainer finetune model=weights/best.pt data=new.toml freeze=10
-  export       export onnx / tensorrt      trainer export model=weights/best.pt format=onnx
-  tune         evolve hyperparameters      trainer tune data=ds.toml tune_iterations=30
-  tune-thresh  per-class conf thresholds   trainer tune-thresh model=weights/best.pt data=ds.toml
-  report       markdown evaluation report  trainer report model=weights/best.pt data=ds.toml
-  viz-augment  visualize augmentations     trainer viz-augment data=ds.toml n=16
-  bench-data   dataloader throughput       trainer bench-data data=ds.toml
+  train        train a model              trainer train data=ds.toml model=trainer-n epochs=100
+  val          evaluate a checkpoint      trainer val model=runs/exp/weights/best.pt data=ds.toml
+  predict      run inference              trainer predict model=best.pt source=images/ conf=0.4
+  finetune     transfer-learn             trainer finetune model=best.pt data=new.toml freeze=10
+  export       export onnx / tensorrt     trainer export model=best.pt format=onnx
+  tune         evolve hyperparameters     trainer tune data=ds.toml tune_iterations=30
+  tune-thresh  per-class conf thresholds  trainer tune-thresh model=best.pt data=ds.toml
+  report       markdown evaluation report trainer report model=best.pt data=ds.toml
+  viz-augment  visualize augmentations    trainer viz-augment data=ds.toml n=16
+  bench-data   dataloader throughput      trainer bench-data data=ds.toml
+  bench-model  profile model sizes        trainer bench-model model=trainer scales=n,s,m,l,x
   version      print version
 """
 
@@ -108,18 +109,17 @@ def main(argv: list[str] | None = None) -> int:
         model = _model_from(overrides)
         results = model.predict(source, **overrides)
         save_dir.mkdir(parents=True, exist_ok=True)
-        import cv2
+        from trainer.detection.utils.image import imwrite_rgb
         for r in results:
             out = save_dir / Path(r.path).name
-            cv2.imwrite(str(out), r.plot())
+            imwrite_rgb(out, r.plot())
             LOGGER.info(f"{r.path}: {len(r)} detections -> {out}")
         return 0
 
     if command == "export":
         model = _model_from(overrides)
         fmt = str(overrides.pop("format", "onnx"))
-        out = overrides.pop("out", None)
-        model.export(format=fmt, **({"out": out} if out else {}), **overrides)
+        model.export(format=fmt, **overrides)
         return 0
 
     if command == "tune":
@@ -149,15 +149,30 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = overrides.pop("run_dir", None)
         thresholds_path = overrides.pop("thresholds", None)
         model = _model_from(overrides)
-        result = model.val(data, **overrides)
+        out_dir = Path(run_dir) if run_dir else Path("runs/report")
+        result = model.val(
+            data,
+            project=str(out_dir.parent),
+            name=out_dir.name,
+            exist_ok=True,
+            **overrides,
+        )
         from trainer.detection.data import parse_dataset_toml
         from trainer.detection.reporting import generate_report
-        parsed = parse_dataset_toml(data)
-        cfg = load_config({"data": data}, )
-        thresholds = load_toml(thresholds_path) if thresholds_path else None
-        out_dir = Path(run_dir) if run_dir else Path("runs/report")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        generate_report(out_dir, result, parsed["names"], cfg, thresholds=thresholds)
+        if thresholds_path:
+            parsed = parse_dataset_toml(data)
+            thresholds = load_toml(thresholds_path)
+            actual_dir = model.last_run_dir or out_dir
+            cfg = model._cfg({"data": data, **overrides})
+            generate_report(
+                actual_dir,
+                result,
+                parsed["names"],
+                cfg,
+                thresholds=thresholds,
+                plots_dir=actual_dir / "plots",
+                out_name="reports/report.md",
+            )
         return 0
 
     if command == "viz-augment":
@@ -165,6 +180,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "bench-data":
         return _bench_data(overrides)
+
+    if command == "bench-model":
+        return _bench_model(overrides)
 
     return 2
 
@@ -176,6 +194,7 @@ def _viz_augment(overrides: dict) -> int:
     from trainer.detection.data import parse_dataset_toml
     from trainer.detection.data.build import _resolve_split
     from trainer.detection.data.dataset import DetectionDataset
+    from trainer.detection.utils.image import imwrite_rgb
     from trainer.detection.utils.plotting import draw_boxes, make_grid
 
     data = overrides.pop("data", None)
@@ -194,7 +213,7 @@ def _viz_augment(overrides: dict) -> int:
         sample = pipeline(sample)
         img = draw_boxes(sample["image"], sample["boxes"], sample["cls"], parsed["names"])
         tiles.append(cv2.resize(img, (320, 320)))
-    cv2.imwrite(str(out), make_grid(tiles, cols=int(np.ceil(np.sqrt(n)))))
+    imwrite_rgb(out, make_grid(tiles, cols=int(np.ceil(np.sqrt(n)))))
     LOGGER.info(f"augmentation preview: {out}")
     return 0
 
@@ -219,6 +238,28 @@ def _bench_data(overrides: dict) -> int:
     dt = time.time() - t0
     LOGGER.info(f"dataloader: {seen} images in {dt:.1f}s = {seen / dt:.1f} img/s "
                 f"(batch={cfg['batch']}, workers={cfg['workers']}, cache={cfg['cache']})")
+    return 0
+
+
+def _bench_model(overrides: dict) -> int:
+    from trainer.detection.engine.benchmark import benchmark_models, write_benchmark
+    from trainer.detection.utils.checks import select_device
+
+    model_base = str(overrides.pop("model", "trainer"))
+    suffix = model_base.rsplit("-", 1)[-1]
+    if suffix in {"n", "s", "m", "l", "x", "nano", "small", "medium", "large", "xlarge"}:
+        model_base = model_base.rsplit("-", 1)[0]
+    scales = [value.strip() for value in str(overrides.pop("scales", "n,s,m,l,x")).split(",") if value.strip()]
+    warmup = int(overrides.pop("warmup", 10))
+    iterations = int(overrides.pop("iterations", 50))
+    out = Path(str(overrides.pop("out", "model_benchmark.json")))
+    cfg = load_config(overrides)
+    result = benchmark_models(
+        model_base, scales, imgsz=int(cfg["imgsz"]), batch=int(cfg["batch"]),
+        device=select_device(str(cfg["device"])), warmup=warmup, iterations=iterations,
+    )
+    write_benchmark(result, out)
+    LOGGER.info(f"model benchmark: {out}")
     return 0
 
 

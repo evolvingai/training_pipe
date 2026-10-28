@@ -1,8 +1,8 @@
-"""In-house COCO-protocol detection metrics: AP per class, mAP50, mAP50-95.
+"""COCO-style detection metrics: AP per class, mAP50, and mAP50-95.
 
 Implements 101-point interpolated AP over IoU thresholds 0.50:0.05:0.95,
-greedy matching of predictions to ground truth per class, plus a confusion
-matrix. Verified against pycocotools-generated reference fixtures in tests.
+confidence-ordered greedy matching of predictions to ground truth per class,
+plus a confusion matrix. For official COCO numbers use ``coco_evaluate``.
 """
 
 from __future__ import annotations
@@ -15,15 +15,29 @@ import torch
 from trainer.detection.utils.boxes import box_iou
 
 IOU_THRESHOLDS = np.linspace(0.5, 0.95, 10)
+EVALUATOR_VERSION = "trainer-greedy-v2"
+
+
+def greedy_matches(iou: np.ndarray, eligible: np.ndarray, threshold: float) -> list[tuple[int, int]]:
+    """Match confidence-ordered columns to their best unmatched eligible GT row."""
+    available = np.ones(iou.shape[0], dtype=bool)
+    pairs = []
+    for p in np.flatnonzero((eligible & (iou >= threshold)).any(axis=0)):
+        candidates = np.flatnonzero(available & eligible[:, p] & (iou[:, p] >= threshold))
+        if candidates.size:
+            g = int(candidates[np.argmax(iou[candidates, p])])
+            available[g] = False
+            pairs.append((g, p))
+    return pairs
 
 
 def match_predictions(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, gt_boxes: torch.Tensor,
                       gt_cls: torch.Tensor) -> np.ndarray:
     """True-positive matrix for one image.
 
-    Predictions must be sorted by descending confidence. Returns a bool array
-    (n_pred, n_iou_thresholds): pred i is a TP at threshold t. Each ground
-    truth is matched at most once per threshold, highest-IoU pair first.
+    Returns a bool array (n_pred, n_iou_thresholds): pred i is a TP at
+    threshold t. Predictions must be ordered by descending confidence. Each
+    ordinary GT can be used once; a prediction tries its best unmatched GT.
     """
     n_pred = pred_boxes.shape[0]
     tp = np.zeros((n_pred, len(IOU_THRESHOLDS)), dtype=bool)
@@ -31,36 +45,24 @@ def match_predictions(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, gt_boxes
         return tp
     iou = box_iou(gt_boxes, pred_boxes).cpu().numpy()  # (n_gt, n_pred)
     cls_match = (gt_cls.view(-1, 1) == pred_cls.view(1, -1)).cpu().numpy()
-    iou = iou * cls_match
+
     for ti, thr in enumerate(IOU_THRESHOLDS):
-        gi, pi = np.nonzero(iou >= thr)
-        if gi.size == 0:
-            continue
-        pairs = np.stack([gi, pi, iou[gi, pi]], axis=1)
-        pairs = pairs[pairs[:, 2].argsort()[::-1]]
-        used_gt: set[int] = set()
-        used_pred: set[int] = set()
-        for g, p, _ in pairs:
-            g, p = int(g), int(p)
-            if g in used_gt or p in used_pred:
-                continue
-            used_gt.add(g)
-            used_pred.add(p)
+        for _, p in greedy_matches(iou, cls_match, thr):
             tp[p, ti] = True
     return tp
 
 
 def compute_ap(recall: np.ndarray, precision: np.ndarray) -> float:
     """101-point interpolated AP from raw recall/precision curves."""
-    mrec = np.concatenate(([0.0], recall, [recall[-1] + 0.01]))
-    mpre = np.concatenate(([1.0], precision, [0.0]))
-    mpre = np.flip(np.maximum.accumulate(np.flip(mpre)))
-    x = np.linspace(0, 1, 101)
-    # Integrate directly instead of calling np.trapz: NumPy 2.4 removed that
-    # deprecated alias, while Trainer still supports older NumPy releases that
-    # do not expose np.trapezoid.
-    y = np.interp(x, mrec, mpre)
-    return float(np.sum((y[:-1] + y[1:]) * np.diff(x) * 0.5))
+    if recall.size == 0:
+        return 0.0
+    mpre = np.maximum.accumulate(precision[::-1])[::-1]
+    recall_points = np.linspace(0.0, 1.0, 101)
+    indices = np.searchsorted(recall, recall_points, side="left")
+    sampled = np.zeros(101)
+    valid = indices < len(mpre)
+    sampled[valid] = mpre[indices[valid]]
+    return float(sampled.mean())
 
 
 @dataclass
@@ -77,7 +79,7 @@ class DetMetrics:
     def update(self, pred: torch.Tensor, gt_boxes: torch.Tensor, gt_cls: torch.Tensor) -> None:
         """pred: (n, 6) [x1, y1, x2, y2, conf, cls], sorted or unsorted."""
         if pred.numel():
-            order = pred[:, 4].argsort(descending=True)
+            order = pred[:, 4].argsort(descending=True, stable=True)
             pred = pred[order]
         tp = match_predictions(pred[:, :4], pred[:, 5], gt_boxes, gt_cls)
         self._tp.append(tp)
@@ -93,7 +95,7 @@ class DetMetrics:
         pred_cls = np.concatenate(self._pred_cls, 0)
         gt_cls = np.concatenate(self._gt_cls, 0)
 
-        order = conf.argsort()[::-1]
+        order = np.argsort(-conf, kind="stable")
         tp, conf, pred_cls = tp[order], conf[order], pred_cls[order]
 
         classes = np.unique(gt_cls).astype(int)
@@ -109,8 +111,8 @@ class DetMetrics:
                 continue
             tpc = tp[mask].cumsum(0)
             fpc = (~tp[mask]).cumsum(0)
-            recall = tpc / (n_gt + eps)
-            precision = tpc / (tpc + fpc + eps)
+            recall = tpc / n_gt
+            precision = tpc / np.maximum(tpc + fpc, 1)
             for ti in range(len(IOU_THRESHOLDS)):
                 ap[c, ti] = compute_ap(recall[:, ti], precision[:, ti])
             # P/R at max-F1 operating point on the IoU=0.5 curve
@@ -150,8 +152,8 @@ class DetMetrics:
                     continue
                 tpc = tp[mask].cumsum(0)
                 fpc = (~tp[mask]).cumsum(0)
-                r0 = tpc[:, 0] / (n_gt + eps)
-                p0 = tpc[:, 0] / (tpc[:, 0] + fpc[:, 0] + eps)
+                r0 = tpc[:, 0] / n_gt
+                p0 = tpc[:, 0] / np.maximum(tpc[:, 0] + fpc[:, 0], 1)
                 f1_0 = 2 * p0 * r0 / (p0 + r0 + eps)
                 c_c = conf[mask]  # descending
                 mean_pr += np.interp(recall_pts,
@@ -206,6 +208,7 @@ class ConfusionMatrix:
 
     def update(self, pred: torch.Tensor, gt_boxes: torch.Tensor, gt_cls: torch.Tensor) -> None:
         pred = pred[pred[:, 4] > self.conf]
+        pred = pred[pred[:, 4].argsort(descending=True, stable=True)]
         gt_cls_np = gt_cls.int().cpu().numpy()
         if pred.shape[0] == 0:
             for gc in gt_cls_np:
@@ -217,19 +220,12 @@ class ConfusionMatrix:
                 self.matrix[pc, self.nc] += 1  # false positive
             return
         iou = box_iou(gt_boxes, pred[:, :4]).cpu().numpy()
-        gi, pi = np.nonzero(iou >= self.iou_thres)
         matched_gt: set[int] = set()
         matched_pred: set[int] = set()
-        if gi.size:
-            pairs = np.stack([gi, pi, iou[gi, pi]], 1)
-            pairs = pairs[pairs[:, 2].argsort()[::-1]]
-            for g, p, _ in pairs:
-                g, p = int(g), int(p)
-                if g in matched_gt or p in matched_pred:
-                    continue
-                matched_gt.add(g)
-                matched_pred.add(p)
-                self.matrix[pred_cls[p], gt_cls_np[g]] += 1
+        for g, p in greedy_matches(iou, np.ones_like(iou, dtype=bool), self.iou_thres):
+            matched_gt.add(g)
+            matched_pred.add(p)
+            self.matrix[pred_cls[p], gt_cls_np[g]] += 1
         for g in range(len(gt_cls_np)):
             if g not in matched_gt:
                 self.matrix[self.nc, gt_cls_np[g]] += 1
@@ -262,7 +258,7 @@ class PerImageStats:
         fp_details: list[dict] = []
 
         if pred.numel() > 0:
-            order = pred[:, 4].argsort(descending=True)
+            order = pred[:, 4].argsort(descending=True, stable=True)
             pred_sorted = pred[order].cpu().numpy()
         else:
             pred_sorted = np.zeros((0, 6), dtype=np.float32)
@@ -276,24 +272,17 @@ class PerImageStats:
             if gt_boxes.is_cuda:
                 pred_boxes_t = pred_boxes_t.to(gt_boxes.device)
             iou = box_iou(gt_boxes, pred_boxes_t).cpu().numpy()  # (n_gt, n_pred)
-            gi, pi = np.nonzero(iou >= self.iou_thres)
-            if gi.size:
-                pairs = np.stack([gi, pi, iou[gi, pi]], axis=1)
-                pairs = pairs[pairs[:, 2].argsort()[::-1]]
-                for g, p, _ in pairs:
-                    g, p = int(g), int(p)
-                    if g in matched_gt or p in matched_pred:
-                        continue
-                    matched_gt.add(g)
-                    matched_pred.add(p)
-                    pc = int(pred_sorted[p, 5])
-                    gc = int(gt_cls_np[g])
-                    if pc == gc:
-                        tp_c[pc] += 1
-                    else:
-                        fp_c[pc] += 1
-                        fn_c[gc] += 1
-                        fp_details.append({"pred_cls": pc, "gt_cls": gc})
+            for g, p in greedy_matches(iou, np.ones_like(iou, dtype=bool), self.iou_thres):
+                matched_gt.add(g)
+                matched_pred.add(p)
+                pc = int(pred_sorted[p, 5])
+                gc = int(gt_cls_np[g])
+                if pc == gc:
+                    tp_c[pc] += 1
+                else:
+                    fp_c[pc] += 1
+                    fn_c[gc] += 1
+                    fp_details.append({"pred_cls": pc, "gt_cls": gc})
 
         for p in range(n_pred):
             if p not in matched_pred:

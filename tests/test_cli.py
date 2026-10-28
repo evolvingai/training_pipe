@@ -31,7 +31,7 @@ def test_train_requires_data():
 
 def test_cli_train_and_val(tiny_dataset, tmp_path):
     code = main(["train", f"data={tiny_dataset}", "model=trainer-n", "epochs=1",
-                 "imgsz=96", "batch=4", "workers=0", "device=cpu", "amp=false",
+                 "imgsz=96", "batch=4", "workers=0", "device=cpu", "amp=false", "compile=false",
                  "mosaic=0.0", f"project={tmp_path}", "name=cli", "warmup_epochs=0.5"])
     assert code == 0
     best = tmp_path / "cli" / "weights" / "best.pt"

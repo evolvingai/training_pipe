@@ -38,6 +38,15 @@ def test_match_predictions_single_gt_single_match():
     assert tp[:, 0].sum() == 1  # only one TP at IoU=0.5
 
 
+def test_match_predictions_respects_confidence_order():
+    gt = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
+    # The first row represents the higher-confidence prediction. COCO-style
+    # matching assigns it first even though the second row has higher IoU.
+    preds = torch.tensor([[1.0, 1.0, 9.0, 9.0], [0.0, 0.0, 10.0, 10.0]])
+    tp = match_predictions(preds, torch.tensor([0.0, 0.0]), gt, torch.tensor([0.0]))
+    assert tp[0, 0] and not tp[1, 0]
+
+
 def test_detmetrics_perfect_detection():
     m = DetMetrics(nc=2)
     gt = torch.tensor([[0.0, 0.0, 10.0, 10.0], [20.0, 20.0, 40.0, 40.0]])
@@ -48,8 +57,8 @@ def test_detmetrics_perfect_detection():
     ])
     m.update(pred, gt, gt_cls)
     r = m.compute()
-    assert r["mAP50"] > 0.99
-    assert r["mAP50-95"] > 0.99
+    assert abs(r["mAP50"] - 1.0) < 1e-12
+    assert abs(r["mAP50-95"] - 1.0) < 1e-12
 
 
 def test_detmetrics_false_positive_lowers_map():

@@ -58,16 +58,31 @@ def filter_boxes(sample: dict, original_areas: np.ndarray | None = None, min_vis
 class Compose:
     def __init__(self, transforms: list[Transform], seed: int | None = None):
         self.transforms = transforms
-        self.rng = random.Random(seed)
+        self.seed = int(seed or 0)
+        self._rngs: dict[tuple[int, int], random.Random] = {}
+
+    def _rng(self) -> random.Random:
+        """Return an independent deterministic stream for each data-loader worker."""
+        from torch.utils.data import get_worker_info
+
+        info = get_worker_info()
+        worker_id = -1 if info is None else info.id
+        worker_seed = self.seed if info is None else info.seed
+        key = (worker_id, worker_seed)
+        if key not in self._rngs:
+            self._rngs[key] = random.Random(worker_seed)
+        return self._rngs[key]
 
     def set_dataset(self, dataset: Any) -> None:
         for t in self.transforms:
             if getattr(t, "requires_dataset", False):
                 t.set_dataset(dataset)
 
-    def __call__(self, sample: dict) -> dict:
+    def __call__(self, sample: dict, rng_seed: int | None = None, disabled=()) -> dict:
+        rng = self._rng() if rng_seed is None else random.Random(rng_seed)
         for t in self.transforms:
-            sample = t(sample, self.rng)
+            if type(t).__name__ not in disabled:
+                sample = t(sample, rng)
         return sample
 
     def apply_many(self, samples: list[dict]) -> list[dict]:
@@ -78,15 +93,16 @@ class Compose:
         """
         if not samples:
             return []
-        initial_state = self.rng.getstate()
+        rng = self._rng()
+        initial_state = rng.getstate()
         next_state = None
         output = []
         for sample in samples:
-            self.rng.setstate(initial_state)
+            rng.setstate(initial_state)
             output.append(self(sample))
             if next_state is None:
-                next_state = self.rng.getstate()
-        self.rng.setstate(next_state)
+                next_state = rng.getstate()
+        rng.setstate(next_state)
         return output
 
     def disable(self, names: set[str]) -> None:

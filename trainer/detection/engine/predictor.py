@@ -12,6 +12,7 @@ import torch
 from trainer.augmentation.geometric import LetterBox
 from trainer.detection.data.dataset import IMG_SUFFIXES
 from trainer.detection.utils.boxes import scale_boxes
+from trainer.detection.utils.image import imread_rgb
 from trainer.detection.utils.logging import LOGGER
 from trainer.detection.utils.nms import non_max_suppression
 from trainer.detection.utils.plotting import draw_boxes
@@ -31,7 +32,8 @@ class Results:
         return len(self.conf)
 
     def plot(self, image: np.ndarray | None = None) -> np.ndarray:
-        img = image if image is not None else cv2.imread(self.path)
+        """Draw the detections on the source image. Takes and returns RGB."""
+        img = image if image is not None else imread_rgb(self.path)
         return draw_boxes(img, self.boxes, self.cls, self.names, self.conf)
 
     def to_label_txt(self) -> str:
@@ -62,10 +64,28 @@ def gather_sources(source: str | Path | list) -> list[str]:
             out.extend(gather_sources(s))
         return out
     p = Path(source)
+    if not p.exists():
+        raise FileNotFoundError(f"prediction source not found: {p}")
     if p.is_dir():
-        return sorted(str(f) for f in p.rglob("*") if f.suffix.lower() in IMG_SUFFIXES)
+        paths = sorted(str(f) for f in p.rglob("*") if f.suffix.lower() in IMG_SUFFIXES)
+        if not paths:
+            raise FileNotFoundError(f"no supported images found in: {p}")
+        return paths
     if p.suffix == ".txt":
-        return [line.strip() for line in p.read_text().splitlines() if line.strip()]
+        paths = []
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            item = Path(line.strip())
+            paths.append(str(item if item.is_absolute() else p.parent / item))
+        if not paths:
+            raise FileNotFoundError(f"prediction source list is empty: {p}")
+        missing = [item for item in paths if not Path(item).exists()]
+        if missing:
+            raise FileNotFoundError(f"prediction source list contains missing path: {missing[0]}")
+        return paths
+    if p.suffix.lower() not in IMG_SUFFIXES:
+        raise ValueError(f"unsupported prediction source type: {p}")
     return [str(p)]
 
 
@@ -85,6 +105,8 @@ class Predictor:
         vec = torch.full((nc,), default)
         by_name = {v: k for k, v in self.names.items()}
         for name, thr in thresholds.items():
+            if not 0 <= float(thr) <= 1:
+                raise ValueError(f"threshold for class '{name}' must be in [0, 1]")
             if name in by_name:
                 vec[by_name[name]] = float(thr)
         self.per_class_conf = vec
@@ -99,10 +121,14 @@ class Predictor:
     @torch.no_grad()
     def predict(self, source, conf: float | None = None, embed: bool = False,
                 batch_size: int = 16) -> list[Results]:
+        conf = conf if conf is not None else float(self.cfg["conf"])
+        if not 0 <= float(conf) <= 1:
+            raise ValueError("confidence threshold must be in [0, 1]")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
         paths = gather_sources(source)
         total = len(paths)
         LOGGER.info(f"scanning source → {total} image(s) found")
-        conf = conf if conf is not None else float(self.cfg["conf"])
         results: list[Results] = []
         for start in range(0, total, batch_size):
             chunk = paths[start:start + batch_size]
@@ -110,8 +136,9 @@ class Predictor:
             LOGGER.info(f"  [{start + 1}–{start + len(chunk)}/{total}] {remaining} remaining")
             imgs, metas = [], []
             for p in chunk:
-                orig = cv2.imread(p)
+                orig = imread_rgb(p)
                 if orig is None:
+                    LOGGER.warning(f"skipping unreadable prediction image: {p}")
                     continue
                 tensor, ratio, pad = self._preprocess(orig)
                 imgs.append(tensor)
@@ -123,6 +150,7 @@ class Predictor:
             preds = non_max_suppression(
                 decoded.float(), conf_thres=conf, iou_thres=float(self.cfg["iou"]),
                 max_det=int(self.cfg["max_det"]), per_class_conf=self.per_class_conf,
+                multi_label=bool(self.cfg.get("nms_multi_label", False)),
             )
             embeddings = None
             if embed:

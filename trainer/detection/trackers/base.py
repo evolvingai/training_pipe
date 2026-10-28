@@ -23,21 +23,23 @@ class Tracker:
 class MultiTracker(Tracker):
     """Fans out to backends, swallowing (and logging) their exceptions."""
 
-    def __init__(self, trackers: list[Tracker]):
+    def __init__(self, trackers: list[Tracker], retries: int = 0, backoff: float = 1.0):
         self.trackers = trackers
+        self.retries = max(int(retries), 0)
+        self.backoff = max(float(backoff), 0.0)
 
     def _each(self, method: str, *args, **kwargs) -> None:
         for t in self.trackers:
-            for attempt in range(3):
+            for attempt in range(self.retries + 1):
                 try:
                     getattr(t, method)(*args, **kwargs)
                     break
                 except Exception as e:  # noqa: BLE001 - tracker failure must not kill training
-                    if attempt == 2:
+                    if attempt == self.retries:
                         LOGGER.warning(f"tracker {type(t).__name__}.{method} failed: {e}")
                     else:
                         import time
-                        time.sleep(2 ** attempt)
+                        time.sleep(self.backoff * (2 ** attempt))
 
     def log_params(self, params: dict) -> None:
         self._each("log_params", params)
@@ -60,6 +62,9 @@ class MultiTracker(Tracker):
     @property
     def run_id(self) -> str | None:
         for t in self.trackers:
-            if t.run_id:
-                return t.run_id
+            try:
+                if t.run_id:
+                    return t.run_id
+            except Exception as error:  # noqa: BLE001 - tracker failure must not kill training
+                LOGGER.warning(f"tracker {type(t).__name__}.run_id failed: {error}")
         return None

@@ -14,7 +14,9 @@ the same plugin registry.
 - Outbound-only VM agent: heartbeat, claim, step status, live log tail,
   cancellation, artifact inventory, and target-machine pinning.
 - Recipes for detector train, finetune, evaluate/report, predict, export, and
-  hyperparameter tuning.
+  hyperparameter tuning. Detector train/finetune forms also expose MuSGD,
+  exact/continue/branch resume, DFL/regression-width experiments, and frozen
+  teacher distillation from the latest integrated detector.
 - Detector-parity image-classifier recipes: train/resume, finetune, evaluate,
   per-class threshold tuning, HTML report, top-k prediction, hyperparameter
   tuning, augmentation preview, data benchmark, and ONNX/TensorRT export.

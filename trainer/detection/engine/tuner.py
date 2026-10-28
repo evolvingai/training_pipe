@@ -51,6 +51,25 @@ def mutate(hyp: dict, rng: random.Random, mutation_p: float = 0.8) -> dict:
             return out
 
 
+TUNE_METRICS = ("mAP50-95", "mAP50", "precision", "recall", "f1", "val_loss")
+
+
+def _trial_fitness(result: dict, metric: str) -> float:
+    """Extract a scalar fitness (higher = better) from a validation result dict."""
+    if metric == "val_loss":
+        return -float(result["val_loss"])
+    if metric == "f1":
+        p = float(result.get("precision", 0.0))
+        r = float(result.get("recall", 0.0))
+        return 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+    if metric not in result:
+        raise ValueError(
+            f"tune_metric '{metric}' not found in validation results. "
+            f"Available: {TUNE_METRICS}"
+        )
+    return float(result[metric])
+
+
 class Tuner:
     """Evolution loop: mutate best-known hyps, run short trainings, keep the best.
 
@@ -59,6 +78,10 @@ class Tuner:
 
     def __init__(self, overrides: dict | None = None):
         self.cfg = load_config(overrides)
+        metric = str(self.cfg.get("tune_metric", "mAP50-95"))
+        if metric not in TUNE_METRICS:
+            raise ValueError(f"unknown tune_metric '{metric}'. Choose from: {TUNE_METRICS}")
+        self.metric = metric
         self.rng = random.Random(int(self.cfg["seed"]))
         self.dir = increment_path(Path(self.cfg["project"]) / f"{self.cfg['name']}_tune")
         self.history: list[tuple[float, dict]] = []
@@ -73,6 +96,7 @@ class Tuner:
         min_trials = int(cfg["tune_min_trials"])
         max_trials = int(cfg["tune_max_trials"])
 
+        LOGGER.info(f"tuning metric: {self.metric}")
         base_hyp = {k: cfg[k] for k in SEARCH_SPACE}
         best_fitness = -math.inf
         best_hyp = dict(base_hyp)
@@ -94,10 +118,10 @@ class Tuner:
             })
             try:
                 result = Trainer(cfg=trial_cfg).train()
-                fitness = float(result.get("mAP50-95", 0.0))
+                fitness = _trial_fitness(result, self.metric)
             except Exception as e:  # noqa: BLE001 - a bad trial must not kill the tuner
                 LOGGER.warning(f"trial {trial} failed: {e}")
-                fitness = 0.0
+                fitness = -math.inf
             self.history.append((fitness, hyp))
             improved = fitness > best_fitness + min_delta
             if improved:
@@ -106,16 +130,22 @@ class Tuner:
                 no_improve = 0
             else:
                 no_improve += 1
-            LOGGER.info(f"tune trial {trial + 1}: fitness={fitness:.4f} "
-                        f"best={best_fitness:.4f} (no improvement x{no_improve})")
-            self._save(best_hyp, best_fitness)
+            fitness_text = f"{fitness:.4f}" if math.isfinite(fitness) else "failed"
+            best_text = f"{best_fitness:.4f}" if math.isfinite(best_fitness) else "none"
+            LOGGER.info(f"tune trial {trial + 1} [{self.metric}]: fitness={fitness_text} "
+                        f"best={best_text} (no improvement x{no_improve})")
+            if math.isfinite(best_fitness):
+                self._save(best_hyp, best_fitness)
             if trial + 1 >= min_trials and no_improve >= patience:
                 LOGGER.info(f"tuner stopped: {patience} trials without improvement")
                 break
             if time_budget_s and time.time() - t0 > time_budget_s:
                 LOGGER.info("tuner stopped: time budget exhausted")
                 break
+        if not math.isfinite(best_fitness):
+            raise RuntimeError("all tuning trials failed; inspect the trial warnings above")
         return best_hyp
 
     def _save(self, best_hyp: dict, best_fitness: float) -> None:
-        toml_dump({"fitness": best_fitness, **best_hyp}, self.dir / "best_hyp.toml")
+        toml_dump({"fitness": best_fitness, "tune_metric": self.metric, **best_hyp},
+                  self.dir / "best_hyp.toml")

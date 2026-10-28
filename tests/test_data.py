@@ -1,9 +1,11 @@
+import json
+
 import numpy as np
 import torch
 
 from trainer.detection.config import load_config
 from trainer.detection.data import build_dataloader, parse_dataset_toml
-from trainer.detection.data.build import _resolve_split, collate_fn
+from trainer.detection.data.build import DistributedWeightedSampler, _resolve_split, collate_fn
 from trainer.detection.data.dataset import DetectionDataset, img2label_path
 
 
@@ -47,10 +49,25 @@ def test_dataset_skips_corrupt_image(tmp_path):
     assert ds.skipped_total == 1
 
 
+def test_dataset_rejects_out_of_range_class(tmp_path):
+    import cv2
+
+    img_dir = tmp_path / "images"
+    lbl_dir = tmp_path / "labels"
+    img_dir.mkdir()
+    lbl_dir.mkdir()
+    for name, cls in (("ok", 1), ("bad", 2)):
+        cv2.imwrite(str(img_dir / f"{name}.jpg"), np.zeros((32, 32, 3), np.uint8))
+        (lbl_dir / f"{name}.txt").write_text(f"{cls} 0.5 0.5 0.5 0.5\n")
+    ds = DetectionDataset([str(img_dir / "ok.jpg"), str(img_dir / "bad.jpg")], imgsz=32, nc=2)
+    assert len(ds) == 1
+    assert ds.skipped_total == 1
+
+
 def test_getitem_tensor_contract(tiny_dataset):
     parsed = parse_dataset_toml(tiny_dataset)
     paths, _ = _resolve_split(parsed["train"], parsed["root"])
-    from trainer.detection.augment import build_pipeline
+    from trainer.augmentation import build_pipeline
     cfg = load_config({"imgsz": 96, "mosaic": 0.0})
     ds = DetectionDataset(paths, imgsz=96, transforms=build_pipeline(cfg, train=True, seed=0))
     item = ds[0]
@@ -86,3 +103,56 @@ def test_balanced_sampling_builds(tiny_dataset):
     loader = build_dataloader(parsed, cfg, "train")
     batch = next(iter(loader))
     assert batch["img"].shape[0] == 4
+
+
+def test_distributed_weighted_sampler_is_epoch_deterministic():
+    sampler = DistributedWeightedSampler([1.0, 2.0, 3.0, 4.0], num_replicas=2, rank=1, seed=7)
+    first = list(sampler)
+    assert first == list(sampler) and len(first) == 2
+    sampler.set_epoch(1)
+    assert list(sampler) != first
+
+
+def test_optional_pycoco_comparison_uses_same_image_ids(monkeypatch, tmp_path):
+    import cv2
+    from trainer.detection.data import coco_sota_fixes
+    from trainer.detection.engine.validator import validate
+    from trainer.detection.nn.model import DetectionModel
+
+    images = tmp_path / "images"
+    images.mkdir()
+    cv2.imwrite(str(images / "one.jpg"), np.zeros((32, 32, 3), dtype=np.uint8))
+    annotations = tmp_path / "instances.json"
+    annotations.write_text(json.dumps({
+        "images": [{"id": 42, "file_name": "one.jpg", "height": 32, "width": 32}],
+        "categories": [{"id": 7, "name": "thing"}],
+        "annotations": [{
+            "id": 1, "image_id": 42, "category_id": 7, "bbox": [8, 8, 12, 12],
+            "area": 144, "iscrowd": 0,
+        }],
+    }))
+    dataset_toml = tmp_path / "coco.toml"
+    dataset_toml.write_text(
+        f'path = "{tmp_path}"\n'
+        'train = { format = "coco", images = "images", annotations = "instances.json" }\n'
+        'val = { format = "coco", images = "images", annotations = "instances.json" }\n'
+    )
+    parsed = parse_dataset_toml(dataset_toml)
+    cfg = load_config({
+        "data": str(dataset_toml), "imgsz": 32, "batch": 1, "workers": 0,
+        "compare_pycoco": True, "max_det": 5,
+    })
+    loader = build_dataloader(parsed, cfg, "val")
+    captured = {}
+
+    def fake_evaluate(path, predictions, max_dets, image_ids):
+        captured.update(path=path, predictions=predictions, max_dets=max_dets, image_ids=image_ids)
+        return {"AP": 0.2, "AP50": 0.3, "AP75": 0.1, "APs": 0.2, "APm": -1.0, "APl": -1.0}
+
+    monkeypatch.setattr(coco_sota_fixes, "coco_evaluate", fake_evaluate)
+    result = validate(DetectionModel("trainer-n", nc=1), loader, cfg, parsed["names"], device=torch.device("cpu"))
+    assert captured["image_ids"] == [42]
+    assert captured["max_dets"] == [1, 10, 100]
+    assert all(pred["image_id"] == 42 and pred["category_id"] == 7 for pred in captured["predictions"])
+    assert result["pycoco"]["AP"] == 0.2
+    assert result["pycoco_delta"]["AP50"] == result["mAP50"] - 0.3

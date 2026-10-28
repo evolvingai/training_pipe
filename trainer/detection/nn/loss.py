@@ -18,13 +18,17 @@ class TaskAlignedAssigner(nn.Module):
     """
 
     def __init__(self, topk: int = 13, num_classes: int = 80, alpha: float = 0.5, beta: float = 6.0,
-                 eps: float = 1e-9):
+                 eps: float = 1e-9, metric: str = "iou", diagnostics: bool = False):
         super().__init__()
         self.topk = topk
         self.num_classes = num_classes
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
+        if metric not in ("iou", "ciou"):
+            raise ValueError("assignment metric must be iou or ciou")
+        self.metric, self.diagnostics = metric, diagnostics
+        self.last_stats = {}
 
     @torch.no_grad()
     def forward(self, pred_scores, pred_bboxes, anchor_points, gt_labels, gt_bboxes, mask_gt):
@@ -38,6 +42,8 @@ class TaskAlignedAssigner(nn.Module):
         bs, n_max, _ = gt_bboxes.shape
         na = pred_bboxes.shape[1]
         device = pred_bboxes.device
+        if self.diagnostics:
+            self.last_stats = {"gt_count": mask_gt.sum().detach(), "gts_with_positives": torch.zeros((), device=device)}
         if n_max == 0:
             return (
                 torch.full((bs, na), self.num_classes, device=device, dtype=torch.long),
@@ -52,7 +58,8 @@ class TaskAlignedAssigner(nn.Module):
         in_gt = torch.cat([lt, rb], -1).amin(-1) > self.eps
 
         # alignment metric (B, N, A)
-        ious = self._pairwise_ciou(gt_bboxes, pred_bboxes).clamp_(0)
+        ious = (self._pairwise_iou(gt_bboxes, pred_bboxes) if self.metric == "iou" else
+                bbox_iou(gt_bboxes.unsqueeze(2), pred_bboxes.unsqueeze(1), ciou=True)).clamp_(0)
         idx = gt_labels.long().squeeze(-1).clamp_(0, self.num_classes - 1)  # (B, N)
         scores = pred_scores.permute(0, 2, 1)  # (B, nc, A)
         cls_score = scores.gather(1, idx.unsqueeze(-1).expand(-1, -1, na))  # (B, N, A)
@@ -71,11 +78,13 @@ class TaskAlignedAssigner(nn.Module):
         fg_counts = mask_pos.sum(1)  # (B, A)
         if (fg_counts > 1).any():
             multi = (fg_counts.unsqueeze(1) > 1).expand(-1, n_max, -1)
-            best_gt = ious.argmax(1)  # (B, A)
+            best_gt = ious.masked_fill(~mask_pos, -1).argmax(1)  # eligible candidates only
             best_mask = torch.zeros_like(mask_pos)
             best_mask.scatter_(1, best_gt.unsqueeze(1), True)
             mask_pos = torch.where(multi, best_mask & mask_pos, mask_pos)
         fg_mask = mask_pos.any(1)  # (B, A)
+        if self.diagnostics:
+            self.last_stats["gts_with_positives"] = (mask_pos.any(-1) & mask_gt.squeeze(-1).bool()).sum().detach()
         assigned_gt = mask_pos.float().argmax(1)  # (B, A)
 
         batch_idx = torch.arange(bs, device=device).unsqueeze(-1)
@@ -95,7 +104,7 @@ class TaskAlignedAssigner(nn.Module):
         return target_labels, target_bboxes, target_scores, fg_mask
 
     @staticmethod
-    def _pairwise_ciou(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
+    def _pairwise_iou(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
         """(B, N, 4) x (B, A, 4) -> (B, N, A) IoU."""
         gt_ = gt.unsqueeze(2)  # (B, N, 1, 4)
         pr = pred.unsqueeze(1)  # (B, 1, A, 4)
@@ -113,19 +122,22 @@ class DetectionLoss:
         self.no = head.no
         self.stride = head.stride
         self.device = next(model.parameters()).device
-        self.assigner = TaskAlignedAssigner(topk=int(cfg["tal_topk"]), num_classes=self.nc)
+        self.diagnostics = bool(cfg.get("loss_diagnostics"))
+        self.last_diagnostics = {}
+        self.assigner = TaskAlignedAssigner(topk=int(cfg["tal_topk"]), num_classes=self.nc,
+                                            metric=cfg.get("assignment_metric", "iou"), diagnostics=self.diagnostics)
         self.gain_box = float(cfg["box"])
         self.gain_cls = float(cfg["cls"])
         self.gain_dfl = float(cfg["dfl"])
         self.cls_loss = str(cfg.get("cls_loss", "bce"))
         self.focal_gamma = float(cfg.get("focal_gamma", 1.5))
         self.label_smoothing = float(cfg.get("label_smoothing", 0.0))
+        if self.label_smoothing:
+            raise ValueError("label_smoothing must be 0: smoothing quality targets is not supported")
         self.proj = torch.arange(self.reg_max, dtype=torch.float, device=self.device)
+        self._anchor_cache: dict = {}
 
     def _cls_term(self, pred_logits: torch.Tensor, target_scores: torch.Tensor) -> torch.Tensor:
-        if self.label_smoothing > 0.0:
-            eps = self.label_smoothing
-            target_scores = target_scores.clamp(eps / 2.0, 1.0 - eps / 2.0)
         bce = F.binary_cross_entropy_with_logits(pred_logits, target_scores, reduction="none")
         if self.cls_loss == "focal":
             p = pred_logits.sigmoid()
@@ -146,15 +158,22 @@ class DetectionLoss:
     def __call__(self, feats: list[torch.Tensor], batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (total loss * batch size, detached components [box, cls, dfl])."""
         device = feats[0].device
-        if self.proj.device != device:
-            self.proj = self.proj.to(device)
+        if self.proj.device != device or self.proj.dtype != feats[0].dtype:
+            self.proj = self.proj.to(device=device, dtype=feats[0].dtype)
         bs = feats[0].shape[0]
         cat = torch.cat([f.view(bs, self.no, -1) for f in feats], 2)
         pred_dist, pred_logits = cat.split((self.reg_max * 4, self.nc), 1)
         pred_dist = pred_dist.permute(0, 2, 1).contiguous()  # (B, A, 4*reg_max)
         pred_logits = pred_logits.permute(0, 2, 1).contiguous()  # (B, A, nc)
 
-        anchors, strides = make_anchors(feats, self.stride, 0.5)
+        cache_key = (tuple(f.shape[-2:] for f in feats), feats[0].dtype)
+        if cache_key not in self._anchor_cache:
+            a, s = make_anchors(feats, self.stride, 0.5)
+            img_h = feats[0].shape[2] * int(self.stride[0])
+            img_w = feats[0].shape[3] * int(self.stride[0])
+            sv = torch.tensor([img_w, img_h, img_w, img_h], device=device)
+            self._anchor_cache[cache_key] = (a, s, sv)
+        anchors, strides, scale_vec = self._anchor_cache[cache_key]
         na = anchors.shape[0]
 
         # decode boxes in grid units
@@ -162,24 +181,20 @@ class DetectionLoss:
         pred_bboxes = dist2bbox(dist, anchors.unsqueeze(0), xywh=False)  # grid units
 
         # build padded gt tensors (grid units of the concatenated scales)
-        img_h = feats[0].shape[2] * int(self.stride[0])
-        img_w = feats[0].shape[3] * int(self.stride[0])
         batch_idx = batch["batch_idx"]
-        counts = [int((batch_idx == i).sum()) for i in range(bs)]
-        n_max = max(counts + [0])
+        counts = torch.bincount(batch_idx.to(device), minlength=bs)
+        n_max = int(counts.max().item()) if counts.numel() else 0
         gt_labels = torch.zeros((bs, n_max, 1), device=device)
         gt_bboxes = torch.zeros((bs, n_max, 4), device=device)
         mask_gt = torch.zeros((bs, n_max, 1), device=device)
         if n_max:
-            scale_vec = torch.tensor([img_w, img_h, img_w, img_h], device=device)
-            for i in range(bs):
-                sel = batch_idx == i
-                n = counts[i]
-                if n == 0:
-                    continue
-                gt_labels[i, :n, 0] = batch["cls"][sel].to(device)
-                gt_bboxes[i, :n] = xywh2xyxy(batch["bboxes"][sel].to(device) * scale_vec)
-                mask_gt[i, :n, 0] = 1.0
+            b_idx = batch_idx.to(device)
+            offset = torch.cat([torch.zeros(1, device=device, dtype=torch.long),
+                                counts.cumsum(0)[:-1]])
+            pos = torch.arange(b_idx.shape[0], device=device) - offset[b_idx]
+            gt_labels[b_idx, pos, 0] = batch["cls"].to(device)
+            gt_bboxes[b_idx, pos] = xywh2xyxy(batch["bboxes"].to(device) * scale_vec)
+            mask_gt[b_idx, pos, 0] = 1.0
         pred_bboxes_px = pred_bboxes * strides  # (B, A, 4) pixels
 
         target_labels, target_bboxes, target_scores, fg_mask = self.assigner(
@@ -187,6 +202,10 @@ class DetectionLoss:
             gt_labels, gt_bboxes, mask_gt,
         )
         target_scores_sum = target_scores.sum().clamp_(min=1)
+        if self.diagnostics:
+            self.last_diagnostics = {**self.assigner.last_stats, "positive_anchors": fg_mask.sum().detach(),
+                                     "clipped_dfl_sides": torch.zeros((), device=device),
+                                     "total_dfl_sides": fg_mask.sum().detach() * 4}
 
         loss_cls = self._cls_term(pred_logits, target_scores) / target_scores_sum
 
@@ -200,6 +219,23 @@ class DetectionLoss:
             strides_b = strides.unsqueeze(0).expand(bs, -1, -1)[fg_mask]  # (n, 1)
             anchors_b = anchors.unsqueeze(0).expand(bs, -1, -1)[fg_mask]  # (n, 2)
             target_dist = bbox2dist(target_bboxes[fg_mask] / strides_b, anchors_b, self.reg_max)
+            if self.diagnostics:
+                boxes_grid = target_bboxes[fg_mask] / strides_b
+                raw_dist = torch.cat((anchors_b - boxes_grid[:, :2], boxes_grid[:, 2:] - anchors_b), -1)
+                positive_boxes = target_bboxes[fg_mask]
+                area = (positive_boxes[:, 2:] - positive_boxes[:, :2]).prod(-1)
+                self.last_diagnostics.update({
+                    "clipped_dfl_sides": (raw_dist > self.reg_max - 1).sum().detach(),
+                    "positive_small": (area < 32**2).sum().detach(),
+                    "positive_medium": ((area >= 32**2) & (area < 96**2)).sum().detach(),
+                    "positive_large": (area >= 96**2).sum().detach(),
+                    "assignment_overlap_sum": bbox_iou(pred_bboxes_px[fg_mask], target_bboxes[fg_mask],
+                                                        ciou=self.assigner.metric == "ciou").clamp_min(0).sum().detach(),
+                })
+                overlap = bbox_iou(pred_bboxes_px[fg_mask], positive_boxes, ciou=self.assigner.metric == "ciou").clamp_min(0)
+                for size, selected in (("small", area < 32**2), ("medium", (area >= 32**2) & (area < 96**2)),
+                                       ("large", area >= 96**2)):
+                    self.last_diagnostics[f"overlap_{size}_sum"] = overlap[selected].sum().detach()
             pd = pred_dist[fg_mask].view(-1, 4, self.reg_max).permute(0, 2, 1)  # (n, reg_max, 4)
             loss_dfl = (self._dfl_term(pd, target_dist) * weight).sum() / target_scores_sum
 

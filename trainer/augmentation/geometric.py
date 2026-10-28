@@ -36,6 +36,7 @@ class LetterBox(Transform):
     def __call__(self, sample: dict, rng: random.Random) -> dict:
         img = sample["image"]
         h, w = img.shape[:2]
+
         r = min(self.imgsz / h, self.imgsz / w)
         new_w, new_h = round(w * r), round(h * r)
         if (new_w, new_h) != (w, h):
@@ -101,6 +102,12 @@ class RandomPerspective(Transform):
         img = sample["image"]
         h, w = img.shape[:2]
 
+        # Mosaic emits a large native-scale canvas and requests a crop in the
+        # same warp. This keeps object scale aligned with validation images.
+        border = sample.pop("mosaic_border", (0, 0))
+        out_w = w + border[1] * 2
+        out_h = h + border[0] * 2
+
         center = np.eye(3)
         center[0, 2] = -w / 2
         center[1, 2] = -h / 2
@@ -119,14 +126,14 @@ class RandomPerspective(Transform):
         shear_m[1, 0] = math.tan(rng.uniform(-self.shear, self.shear) * math.pi / 180)
 
         trans = np.eye(3)
-        trans[0, 2] = rng.uniform(0.5 - self.translate, 0.5 + self.translate) * w
-        trans[1, 2] = rng.uniform(0.5 - self.translate, 0.5 + self.translate) * h
+        trans[0, 2] = rng.uniform(0.5 - self.translate, 0.5 + self.translate) * out_w
+        trans[1, 2] = rng.uniform(0.5 - self.translate, 0.5 + self.translate) * out_h
 
         m = trans @ shear_m @ rot @ persp @ center
         if self.perspective:
-            img = cv2.warpPerspective(img, m, (w, h), borderValue=(self.pad_value,) * 3)
+            img = cv2.warpPerspective(img, m, (out_w, out_h), borderValue=(self.pad_value,) * 3)
         else:
-            img = cv2.warpAffine(img, m[:2], (w, h), borderValue=(self.pad_value,) * 3)
+            img = cv2.warpAffine(img, m[:2], (out_w, out_h), borderValue=(self.pad_value,) * 3)
 
         boxes = sample["boxes"]
         if boxes.shape[0]:
@@ -203,7 +210,9 @@ class Mosaic(Transform):
         if rng.random() >= self.p:
             return sample
         n = 9 if rng.random() < self.p9 else 4
-        return self._mosaic4(sample, rng) if n == 4 else self._mosaic9(sample, rng)
+        sample = self._mosaic4(sample, rng) if n == 4 else self._mosaic9(sample, rng)
+        sample["mosaic_border"] = (-self.imgsz // 2, -self.imgsz // 2)
+        return sample
 
     def _mosaic4(self, sample: dict, rng: random.Random) -> dict:
         s = self.imgsz

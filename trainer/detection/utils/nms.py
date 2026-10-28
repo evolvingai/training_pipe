@@ -8,17 +8,22 @@ from trainer.detection.utils.boxes import box_iou, xywh2xyxy
 
 
 def nms(boxes: torch.Tensor, scores: torch.Tensor, iou_thres: float) -> torch.Tensor:
-    """Greedy NMS. boxes (N, 4) xyxy, scores (N,). Returns kept indices, score-descending."""
-    order = scores.argsort(descending=True)
-    keep: list[int] = []
-    while order.numel() > 0:
-        i = order[0]
-        keep.append(int(i))
-        if order.numel() == 1:
-            break
-        ious = box_iou(boxes[i].unsqueeze(0), boxes[order[1:]]).squeeze(0)
-        order = order[1:][ious <= iou_thres]
-    return torch.tensor(keep, dtype=torch.long, device=boxes.device)
+    """NMS via torchvision (C++/CUDA). boxes (N, 4) xyxy, scores (N,). Returns kept indices."""
+    try:
+        from torchvision.ops import nms as tv_nms
+        return tv_nms(boxes.float(), scores.float(), iou_thres)
+    except ImportError:
+        # fallback: pure-Python greedy NMS
+        order = scores.argsort(descending=True)
+        keep: list[int] = []
+        while order.numel() > 0:
+            i = order[0]
+            keep.append(int(i))
+            if order.numel() == 1:
+                break
+            ious = box_iou(boxes[i].unsqueeze(0), boxes[order[1:]]).squeeze(0)
+            order = order[1:][ious <= iou_thres]
+        return torch.tensor(keep, dtype=torch.long, device=boxes.device)
 
 
 def non_max_suppression(
@@ -29,6 +34,7 @@ def non_max_suppression(
     agnostic: bool = False,
     per_class_conf: torch.Tensor | None = None,
     max_nms: int = 30000,
+    multi_label: bool = False,
 ) -> list[torch.Tensor]:
     """Batched NMS on raw head output.
 
@@ -44,13 +50,15 @@ def non_max_suppression(
         x = prediction[xi].T  # (A, 4+nc)
         boxes = xywh2xyxy(x[:, :4])
         scores = x[:, 4:]
-        conf, cls = scores.max(1)
-        if per_class_conf is not None:
-            thr = per_class_conf.to(conf.device)[cls]
-            mask = conf > thr
+        if multi_label and nc > 1:
+            thresholds = per_class_conf.to(scores.device) if per_class_conf is not None else conf_thres
+            row, cls = torch.where(scores > thresholds)
+            boxes, conf = boxes[row], scores[row, cls]
         else:
-            mask = conf > conf_thres
-        boxes, conf, cls = boxes[mask], conf[mask], cls[mask]
+            conf, cls = scores.max(1)
+            thr = per_class_conf.to(conf.device)[cls] if per_class_conf is not None else conf_thres
+            mask = conf > thr
+            boxes, conf, cls = boxes[mask], conf[mask], cls[mask]
         if boxes.shape[0] == 0:
             outputs.append(torch.zeros((0, 6), device=prediction.device))
             continue
@@ -58,7 +66,8 @@ def non_max_suppression(
             top = conf.argsort(descending=True)[:max_nms]
             boxes, conf, cls = boxes[top], conf[top], cls[top]
         # class-aware NMS via coordinate offset trick
-        offset = torch.zeros_like(cls) if agnostic else cls.float() * 7680.0
+        coord_span = (boxes.max() - boxes.min()).clamp(min=0) + 1
+        offset = torch.zeros_like(cls) if agnostic else cls.float() * coord_span
         keep = nms(boxes + offset[:, None], conf, iou_thres)[:max_det]
         outputs.append(torch.cat((boxes[keep], conf[keep, None], cls[keep, None].float()), 1))
     _ = nc

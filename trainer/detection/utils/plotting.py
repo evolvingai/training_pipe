@@ -7,11 +7,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-_PALETTE = [
-    (56, 56, 255), (151, 157, 255), (31, 112, 255), (29, 178, 255), (49, 210, 207),
-    (10, 249, 72), (23, 204, 146), (134, 219, 61), (52, 147, 26), (187, 212, 0),
-    (168, 153, 44), (255, 194, 0), (147, 69, 52), (255, 115, 100), (236, 24, 0),
-    (255, 56, 132), (133, 0, 82), (255, 56, 203), (200, 149, 255), (199, 55, 255),
+from trainer.detection.utils.image import imwrite_rgb
+
+_PALETTE = [  # RGB, matching the rest of the pipeline
+    (255, 56, 56), (255, 157, 151), (255, 112, 31), (255, 178, 29), (207, 210, 49),
+    (72, 249, 10), (146, 204, 23), (61, 219, 134), (26, 147, 52), (0, 212, 187),
+    (44, 153, 168), (0, 194, 255), (52, 69, 147), (100, 115, 255), (0, 24, 236),
+    (132, 56, 255), (82, 0, 133), (203, 56, 255), (255, 149, 200), (255, 55, 199),
 ]
 
 
@@ -21,7 +23,7 @@ def color_for(idx: int) -> tuple[int, int, int]:
 
 def draw_boxes(image: np.ndarray, boxes: np.ndarray, classes: np.ndarray,
                names: dict[int, str] | None = None, confs: np.ndarray | None = None) -> np.ndarray:
-    """Draw xyxy boxes with class labels on a BGR image (copy)."""
+    """Draw xyxy boxes with class labels on an RGB image (copy)."""
     img = image.copy()
     for i, (box, cls) in enumerate(zip(boxes, classes)):
         c = int(cls)
@@ -38,7 +40,7 @@ def draw_boxes(image: np.ndarray, boxes: np.ndarray, classes: np.ndarray,
 
 
 def make_grid(images: list[np.ndarray], cols: int = 4) -> np.ndarray:
-    """Tile equally-sized BGR images into a grid."""
+    """Tile equally-sized RGB images into a grid."""
     if not images:
         return np.zeros((64, 64, 3), dtype=np.uint8)
     h, w = images[0].shape[:2]
@@ -132,5 +134,5 @@ def plot_curve(x: np.ndarray, ys: dict[str, np.ndarray], out_path: str | Path,
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_path), canvas)
+    imwrite_rgb(out_path, canvas)
     return out_path

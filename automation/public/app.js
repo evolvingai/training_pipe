@@ -389,6 +389,42 @@ function detectionForm(mode, datasets = []) {
     tune: ['Tune', 'Run detector hyperparameter evolution.'],
   };
   let body = '';
+  const experimentFields = `<details class="adv"><summary>Detector optimizer, resume and distillation</summary>
+    <p class="muted">Latest detector controls from the integrated <code>cristina/parms_fixes</code> implementation. Defaults preserve the standard recipe.</p>
+    <div class="adv-grid">
+      <label class="field"><span>Optimizer</span><select name="optimizer"><option value="auto">Auto</option><option value="sgd">SGD</option><option value="adamw">AdamW</option><option value="musgd">MuSGD</option></select></label>
+      ${field('resume', 'Resume checkpoint', { placeholder: '/runs/experiment/weights/last.pt' })}
+      <label class="field"><span>Resume mode</span><select name="resumeMode"><option value="exact">Exact</option><option value="continue">Continue with changed horizon/LR</option><option value="branch">Controlled branch</option></select></label>
+      ${field('regMax', 'DFL bins', { value: '16', type: 'number', min: 2 })}
+      ${field('regChannels', 'Regression channels (0 = auto)', { value: '0', type: 'number', min: 0 })}
+      <label class="field"><span>Assignment metric</span><select name="assignmentMetric"><option value="iou">IoU</option><option value="ciou">CIoU experiment</option></select></label>
+    </div>
+    <h4>Teacher distillation</h4><div class="adv-grid">
+      ${field('teacher', 'Teacher checkpoint', { placeholder: '/runs/teacher/weights/best.pt' })}
+      ${field('distillFeatureWeight', 'Feature weight', { type: 'number', min: 0, step: 0.01 })}
+      ${field('distillClsWeight', 'Class-logit weight', { type: 'number', min: 0, step: 0.01 })}
+      ${field('distillBoxWeight', 'Box-distribution weight', { type: 'number', min: 0, step: 0.01 })}
+      ${field('distillTemperature', 'Temperature', { value: '2', type: 'number', min: 0.01, step: 0.1 })}
+    </div>
+    <h4>MuSGD experiments</h4><div class="adv-grid">
+      ${field('muonWeight', 'Muon weight', { value: '0.2', type: 'number', min: 0, step: 0.01 })}
+      ${field('sgdWeight', 'SGD weight', { value: '1', type: 'number', min: 0, step: 0.01 })}
+      ${field('muonBeta', 'Muon beta (-1 = momentum)', { value: '-1', type: 'number', min: -1, step: 0.01 })}
+      ${field('muonNsSteps', 'Newton–Schulz steps', { value: '5', type: 'number', min: 1 })}
+      <label class="field"><span>Muon schedule</span><select name="muonSchedule"><option value="constant">Constant</option><option value="linear">Linear taper</option></select></label>
+      ${field('muonTaperStart', 'Taper start epoch', { value: '300', type: 'number', min: 0 })}
+      ${field('muonTaperEnd', 'Taper end epoch', { value: '400', type: 'number', min: 1 })}
+    </div>
+    <div class="check-grid">
+      <label class="inline-check"><input type="checkbox" name="muonBatchNs" /> Batched Newton–Schulz</label>
+      <label class="inline-check"><input type="checkbox" name="muonExcludeOutputs" /> Exclude output layers</label>
+      <label class="inline-check"><input type="checkbox" name="muonExcludeStem" /> Exclude stem</label>
+      <label class="inline-check"><input type="checkbox" name="muonExcludeDepthwise" /> Exclude depthwise layers</label>
+      <label class="inline-check"><input type="checkbox" name="muonSplitQkv" /> Split QKV</label>
+      <label class="inline-check"><input type="checkbox" name="profile" /> Step profiling</label>
+      <label class="inline-check"><input type="checkbox" name="lossDiagnostics" /> Loss diagnostics</label>
+    </div>
+  </details>`;
   if (mode === 'train') body = `<div class="card"><h3>Dataset and model</h3>
     ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}
     ${architectureField('model', 'Model architecture', { value: 'trainer-n' })}</div>
@@ -396,7 +432,7 @@ function detectionForm(mode, datasets = []) {
       ${field('epochs', 'Epochs', { value: '100', type: 'number', min: 1 })}
       ${field('batch', 'Batch size', { value: '2', type: 'number', min: 1 })}
       ${field('imgsz', 'Image size', { value: '320', type: 'number', min: 32 })}
-    </div></div>`;
+    </div></div>${experimentFields}`;
   if (mode === 'finetune') body = `<div class="card"><h3>Checkpoint and dataset</h3>
     ${field('checkpoint', 'Source checkpoint', { placeholder: '/runs/base/weights/best.pt', required: true })}
     ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}</div>
@@ -405,10 +441,12 @@ function detectionForm(mode, datasets = []) {
       ${field('batch', 'Batch size', { value: '2', type: 'number', min: 1 })}
       ${field('imgsz', 'Image size', { value: '320', type: 'number', min: 32 })}
       ${field('freeze', 'Freeze first N modules', { value: '10', type: 'number', min: 0 })}
-    </div></div>`;
+    </div></div>${experimentFields}`;
   if (mode === 'evaluate') body = `<div class="card"><h3>Evaluation inputs</h3>
     ${field('checkpoint', 'Checkpoint', { placeholder: '/runs/experiment/weights/best.pt', required: true })}
     ${datasetField('detection', 'Dataset TOML', datasets, { placeholder: '/data/dataset.toml' })}
+    <div class="adv-grid"><label class="field"><span>Checkpoint weights</span><select name="evalWeights"><option value="ema">EMA</option><option value="raw">Raw</option></select></label></div>
+    <label class="inline-check"><input type="checkbox" name="nmsMultiLabel" /> Multi-label NMS</label>
     <p class="muted">This recipe runs validation first, then writes the Markdown/CSV report into the named run folder.</p></div>`;
   if (mode === 'predict') body = `<div class="card"><h3>Inference inputs</h3>
     ${field('checkpoint', 'Checkpoint', { placeholder: '/runs/experiment/weights/best.pt', required: true })}

@@ -12,12 +12,14 @@ from trainer.smoke import smoke_all, smoke_architecture
 
 def test_builtin_tasks_and_architectures_are_registered() -> None:
     assert {"detection", "classification", "video-classification", "vlm"} <= set(tasks.names())
-    assert {"trainer-n", "trainer-csp-s", "trainer-fpn-x"} <= set(architectures.names("detection"))
+    assert {"trainer-n", "trainer-csp-s", "trainer-fpn-x", "trainer-p2-n", "trainer-legacy-m"} <= \
+        set(architectures.names("detection"))
     assert "convnext-tiny" in architectures.names("classification")
     assert "r2plus1d-tiny" in architectures.names("video-classification")
     assert {"tiny-vlm-lora", "hf-lora"} <= set(architectures.names("vlm"))
     assert {"finetune", "tune", "tune-thresh", "report", "viz-augment", "bench-data"} <= \
         set(tasks.get("classification").actions)
+    assert "bench-model" in tasks.get("detection").actions
     assert {"evaluate", "val"} <= set(tasks.get("vlm").actions)
 
 

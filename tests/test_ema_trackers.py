@@ -66,9 +66,24 @@ def test_csv_tracker_appends_and_dedups(tmp_path):
     assert rows[1]["loss"] == "0.5"
 
 
+def test_csv_tracker_merges_new_metrics_for_same_step(tmp_path):
+    path = tmp_path / "results.csv"
+    tracker = CSVTracker(path)
+    tracker.log_metrics({"val/AP50_red": 0.2}, step=3)
+    tracker.log_metrics({"val/mAP50": 0.4}, step=3)
+    with path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["val/AP50_red"] == "0.2"
+    assert rows[0]["val/mAP50"] == "0.4"
+
+
 def test_multitracker_swallows_errors():
     class Exploding(Tracker):
+        calls = 0
+
         def log_metrics(self, metrics, step):
+            self.calls += 1
             raise RuntimeError("boom")
 
     calls = []
@@ -77,6 +92,8 @@ def test_multitracker_swallows_errors():
         def log_metrics(self, metrics, step):
             calls.append(step)
 
-    mt = MultiTracker([Exploding(), Recording()])
+    exploding = Exploding()
+    mt = MultiTracker([exploding, Recording()])
     mt.log_metrics({"x": 1.0}, step=5)  # must not raise
     assert calls == [5]
+    assert exploding.calls == 1

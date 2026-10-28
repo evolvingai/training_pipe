@@ -1,10 +1,11 @@
 import random
 
 import numpy as np
+import pytest
 
 from trainer.detection.config import load_config
 from trainer.detection.engine.thresh_tuner import _fitness, tune_thresholds
-from trainer.detection.engine.tuner import SEARCH_SPACE, mutate
+from trainer.detection.engine.tuner import SEARCH_SPACE, Tuner, mutate
 
 
 def make_stats(n=200, seed=0):
@@ -70,3 +71,15 @@ def test_mutate_respects_bounds():
         assert out != base
         for key, (_, lo, hi) in SEARCH_SPACE.items():
             assert lo <= out[key] <= hi
+
+
+def test_all_failed_tuning_trials_raise(monkeypatch, tmp_path):
+    from trainer.detection.engine.trainer import Trainer
+
+    monkeypatch.setattr(Trainer, "train", lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+    tuner = Tuner({
+        "data": "unused.toml", "project": str(tmp_path), "name": "failed",
+        "tune_iterations": 2, "tune_max_trials": 2, "tune_min_trials": 1,
+    })
+    with pytest.raises(RuntimeError, match="all tuning trials failed"):
+        tuner.run()

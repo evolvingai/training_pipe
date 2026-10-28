@@ -27,7 +27,8 @@ def collect_stats(model, dataloader, cfg: dict, nc: int, device=None) -> list[di
             imgs = batch["img"].to(device).float() / 255.0
             decoded, _ = model(imgs)
             preds = non_max_suppression(decoded.float(), conf_thres=0.001,
-                                        iou_thres=float(cfg["iou"]), max_det=int(cfg["max_det"]))
+                                        iou_thres=float(cfg["iou"]), max_det=int(cfg["max_det"]),
+                                        multi_label=bool(cfg.get("nms_multi_label", False)))
             h, w = imgs.shape[-2:]
             scale_vec = torch.tensor([w, h, w, h], device=device)
             for i, pred in enumerate(preds):

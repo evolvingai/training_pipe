@@ -3,9 +3,9 @@
 Directory layout produced:
     run_dir/
         cfg/
-            args.yaml       resolved val config
-            model.yaml      model architecture config
-            dataset.yaml    dataset config copy
+            args.toml       resolved val config
+            model.toml      model architecture config
+            dataset.toml    dataset config copy
         logs/
             val_results.json  global + per-class metrics
             val_results.csv   tabular, one row per class + global
@@ -25,54 +25,16 @@ from __future__ import annotations
 import csv
 import json
 import logging
-try:
-    import tomllib
-except ImportError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib
+import tomllib
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from trainer.detection.config import dumps as toml_dumps
+from trainer.detection.utils.image import imwrite_rgb
 from trainer.detection.utils.logging import LOGGER
 from trainer.detection.utils.plotting import plot_curve
-
-
-# ---------------------------------------------------------------------------
-# YAML helpers (no PyYAML dependency)
-# ---------------------------------------------------------------------------
-
-def _fmt_yaml_scalar(v) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if v is None:
-        return "null"
-    if isinstance(v, str):
-        needs_quote = any(c in v for c in ':#[]{},&*?|-<>=!%@`\'"\\') or not v
-        if needs_quote:
-            return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
-        return v
-    return str(v)
-
-
-def _dump_yaml(data: dict, indent: int = 0) -> str:
-    lines = []
-    pad = "  " * indent
-    for k, v in data.items():
-        if isinstance(v, dict):
-            lines.append(f"{pad}{k}:")
-            lines.append(_dump_yaml(v, indent + 1))
-        elif isinstance(v, (list, tuple)):
-            if v and isinstance(v[0], (list, tuple)):
-                lines.append(f"{pad}{k}:")
-                for row in v:
-                    lines.append(f"{pad}  - {json.dumps(row)}")
-            else:
-                inner = ", ".join(_fmt_yaml_scalar(x) for x in v)
-                lines.append(f"{pad}{k}: [{inner}]")
-        else:
-            lines.append(f"{pad}{k}: {_fmt_yaml_scalar(v)}")
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -106,39 +68,40 @@ def _base_model_name(model_name: str) -> str:
     return model_name
 
 
-def write_cfg(run_dir: Path, cfg: dict, data_path: str, model_name: str) -> None:
+def write_cfg(run_dir: Path, cfg: dict, data_path: str, model_name: str | dict) -> None:
     cfg_dir = run_dir / "cfg"
     cfg_dir.mkdir(parents=True, exist_ok=True)
 
-    # args.yaml — scalar values from resolved config
-    args = {k: v for k, v in cfg.items()
-            if isinstance(v, (str, int, float, bool)) or v is None}
-    (cfg_dir / "args.yaml").write_text(_dump_yaml(args) + "\n", encoding="utf-8")
+    # Preserve lists/tables; unsupported types fail instead of silently disappearing.
+    args = {k: v for k, v in cfg.items() if v is not None}
+    (cfg_dir / "args.toml").write_text(toml_dumps(args), encoding="utf-8")
 
-    # model.yaml — architecture TOML serialised as YAML
+    # model.toml — architecture config
     from trainer.detection.config import find_model_cfg
     model_cfg_written = False
-    for name_try in [model_name, _base_model_name(model_name)]:
-        try:
-            model_cfg_path = find_model_cfg(name_try)
-            with model_cfg_path.open("rb") as f:
-                model_cfg = tomllib.load(f)
-            (cfg_dir / "model.yaml").write_text(_dump_yaml(model_cfg) + "\n", encoding="utf-8")
-            model_cfg_written = True
-            break
-        except (FileNotFoundError, Exception):
-            continue
-    if not model_cfg_written:
-        (cfg_dir / "model.yaml").write_text(f"model: {_fmt_yaml_scalar(model_name)}\n",
-                                             encoding="utf-8")
-
-    # dataset.yaml — verbatim copy of data file
-    dp = Path(data_path)
-    if dp.exists():
-        (cfg_dir / "dataset.yaml").write_bytes(dp.read_bytes())
+    if isinstance(model_name, dict):
+        (cfg_dir / "model.toml").write_text(toml_dumps(model_name), encoding="utf-8")
+        model_cfg_written = True
     else:
-        (cfg_dir / "dataset.yaml").write_text(f"data: {_fmt_yaml_scalar(data_path)}\n",
-                                               encoding="utf-8")
+        for name_try in [model_name, _base_model_name(model_name)]:
+            try:
+                model_cfg_path = find_model_cfg(name_try)
+                with model_cfg_path.open("rb") as f:
+                    model_cfg = tomllib.load(f)
+                (cfg_dir / "model.toml").write_text(toml_dumps(model_cfg), encoding="utf-8")
+                model_cfg_written = True
+                break
+            except FileNotFoundError:
+                continue
+    if not model_cfg_written:
+        (cfg_dir / "model.toml").write_text(toml_dumps({"model": model_name}), encoding="utf-8")
+
+    # dataset.toml — verbatim copy of data file
+    dp = Path(data_path)
+    if dp.is_file():
+        (cfg_dir / "dataset.toml").write_bytes(dp.read_bytes())
+    else:
+        (cfg_dir / "dataset.toml").write_text(toml_dumps({"data": data_path}), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +128,19 @@ def write_logs(run_dir: Path, result: dict, names: dict[int, str]) -> None:
             "mAP50-95": round(result["mAP50-95"], 6),
             "precision": round(result["precision"], 6),
             "recall": round(result["recall"], 6),
-            "val_loss": round(float(result.get("val_loss", 0.0)), 6),
+            "val_loss": (round(float(result["val_loss"]), 6) if result.get("val_loss") is not None else None),
         },
         "per_class": per_class,
+        "evaluation": result.get("evaluation", {}),
+        "checkpoint": result.get("checkpoint"),
     }
+    if "pycoco" in result:
+        json_data["pycoco"] = {
+            key: round(float(value), 6) for key, value in result["pycoco"].items()
+        }
+        json_data["pycoco_delta"] = {
+            key: round(float(value), 6) for key, value in result["pycoco_delta"].items()
+        }
     (logs_dir / "val_results.json").write_text(
         json.dumps(json_data, indent=2), encoding="utf-8"
     )
@@ -197,11 +169,16 @@ def write_logs(run_dir: Path, result: dict, names: dict[int, str]) -> None:
         writer.writerows(rows)
 
     if "per_image_stats" in result:
-        per_img_rows = result["per_image_stats"].per_image_class_rows()
+        stats = result["per_image_stats"]
+        per_img_rows = stats.per_image_class_rows()
         with (logs_dir / "per_image_metrics.csv").open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["image", "class", "TP", "FP", "FN", "TN", "FP confused with"])
             writer.writerows(per_img_rows)
+        with (logs_dir / "fp_details.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["image", "predicted class", "matched ground-truth class"])
+            writer.writerows(stats.fp_detail_rows())
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +231,7 @@ def _plot_confusion_matrix(matrix: np.ndarray, names: dict[int, str], out_path: 
                     font, fscale, (40, 40, 40), thick, cv2.LINE_AA)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_path), canvas)
+    imwrite_rgb(out_path, canvas)
 
 
 def write_plots(run_dir: Path, result: dict, names: dict[int, str]) -> None:
@@ -292,7 +269,7 @@ def write_report(run_dir: Path, result: dict, names: dict[int, str], cfg: dict) 
 # ---------------------------------------------------------------------------
 
 def write_val_outputs(run_dir: Path, result: dict, names: dict[int, str],
-                      cfg: dict, data_path: str, model_name: str) -> None:
+                      cfg: dict, data_path: str, model_name: str | dict) -> None:
     write_cfg(run_dir, cfg, data_path, model_name)
     write_logs(run_dir, result, names)
     write_plots(run_dir, result, names)

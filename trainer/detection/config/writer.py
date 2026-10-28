@@ -1,6 +1,6 @@
 """Minimal in-house TOML writer.
 
-Supports Trainer configs: scalar values, homogeneous/heterogeneous
+Supports what trainer configs use: scalar values, homogeneous/heterogeneous
 arrays (including nested arrays), and one level of tables. Keys are written
 bare when possible, quoted otherwise. stdlib ``tomllib`` round-trips the output.
 """
@@ -8,6 +8,7 @@ bare when possible, quoted otherwise. stdlib ``tomllib`` round-trips the output.
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,9 @@ def _fmt_value(value: Any) -> str:
         text = repr(value)
         return text if ("." in text or "e" in text or "E" in text) else text + ".0"
     if isinstance(value, str):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{_fmt_key(k)} = {_fmt_value(v)}" for k, v in value.items()) + " }"
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_fmt_value(v) for v in value) + "]"
     raise TypeError(f"unsupported TOML value type: {type(value).__name__}")

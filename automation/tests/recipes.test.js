@@ -43,6 +43,43 @@ test('CUDA jobs preserve explicit device and larger defaults', () => {
   assert.ok(recipe.commands[0].argv.includes('imgsz=640'));
 });
 
+test('latest detector architectures and experiment controls are passed through', () => {
+  const recipe = buildRecipe('detect_train', {
+    name: 'p2-distill', data: '/data/dataset.toml', model: 'trainer-p2-n', device: 'cpu',
+    optimizer: 'musgd', resume: '/runs/base/weights/last.pt', resumeMode: 'branch',
+    regMax: 12, regChannels: 64, assignmentMetric: 'ciou',
+    teacher: '/runs/teacher/weights/best.pt', distillFeatureWeight: 1,
+    distillClsWeight: 0.5, distillBoxWeight: 0.25, distillTemperature: 3,
+    muonWeight: 0.15, sgdWeight: 0.9, muonBeta: 0.8, muonNsSteps: 4,
+    muonSchedule: 'linear', muonTaperStart: 2, muonTaperEnd: 4,
+    muonBatchNs: true, profile: true, lossDiagnostics: true,
+  }, defaults);
+  const argv = recipe.commands[0].argv;
+  for (const value of [
+    'model=trainer-p2-n', 'optimizer=musgd', 'resume=/runs/base/weights/last.pt',
+    'resume_mode=branch', 'reg_max=12', 'reg_channels=64', 'assignment_metric=ciou',
+    'teacher=/runs/teacher/weights/best.pt', 'distill_feature_weight=1',
+    'distill_cls_weight=0.5', 'distill_box_weight=0.25', 'distill_temperature=3',
+    'muon_weight=0.15', 'sgd_weight=0.9', 'muon_beta=0.8', 'muon_ns_steps=4',
+    'muon_schedule=linear', 'muon_taper_start=2', 'muon_taper_end=4',
+    'muon_batch_ns=true', 'profile=true', 'loss_diagnostics=true',
+  ]) assert.ok(argv.includes(value), value);
+
+  const legacy = buildRecipe('detect_train', {
+    name: 'legacy', data: '/data/dataset.toml', model: 'trainer-legacy-s', device: 'cpu',
+  }, defaults);
+  assert.ok(legacy.commands[0].argv.includes('model=trainer-legacy-s'));
+});
+
+test('detector evaluation can select raw weights and multi-label NMS', () => {
+  const recipe = buildRecipe('detect_evaluate', {
+    name: 'raw-eval', data: '/data/dataset.toml', checkpoint: '/runs/train/weights/best.pt',
+    evalWeights: 'raw', nmsMultiLabel: true,
+  }, defaults);
+  assert.ok(recipe.commands[0].argv.includes('eval_weights=raw'));
+  assert.ok(recipe.commands[0].argv.includes('nms_multi_label=true'));
+});
+
 test('classifier recipes expose the detector-parity lifecycle', () => {
   const recipe = buildRecipe('classifier_train', {
     name: 'species', data: '/data/species', augmentationConfig: '/data/robust.toml',

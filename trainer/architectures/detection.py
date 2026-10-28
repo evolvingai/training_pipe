@@ -12,7 +12,7 @@ def _builder(spec: str):
     return build
 
 
-for _variant in ("trainer", "trainer-csp", "trainer-fpn"):
+for _variant in ("trainer", "trainer-csp", "trainer-fpn", "trainer-p2", "trainer-legacy"):
     for _scale in ("n", "s", "m", "l", "x"):
         _name = f"{_variant}-{_scale}"
         architectures.register(ArchitecturePlugin(

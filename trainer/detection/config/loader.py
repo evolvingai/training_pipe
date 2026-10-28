@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-try:
-    import tomllib
-except ImportError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +40,8 @@ def _coerce(value: Any, reference: Any, key: str) -> Any:
             return float(value)
         if isinstance(value, str):
             return float(value)
+    if isinstance(reference, str):
+        return str(value)
     return value
 
 
@@ -71,12 +70,77 @@ def load_config(overrides: dict[str, Any] | None = None, cfg_path: str | Path | 
     """Load default.toml (or ``cfg_path``) and apply overrides."""
     cfg = load_toml(cfg_path or DEFAULT_CFG_PATH)
     if overrides:
-        augmentation_path = overrides.get("augmentation_config")
-        if augmentation_path:
-            from trainer.augmentation.config import load_augmentation_config
-            cfg = merge_overrides(cfg, load_augmentation_config(augmentation_path))
         cfg = merge_overrides(cfg, overrides)
+    _validate_config(cfg)
     return cfg
+
+
+def _validate_config(cfg: dict[str, Any]) -> None:
+    """Reject invalid and unsupported settings before any expensive work."""
+    if cfg.get("task") != "detect":
+        raise ValueError("only task='detect' is supported")
+    if cfg.get("resume_mode") not in ("exact", "continue", "branch"):
+        raise ValueError("resume_mode must be 'exact', 'continue' or 'branch'")
+    if cfg["assignment_metric"] not in ("iou", "ciou"):
+        raise ValueError("assignment_metric must be iou or ciou")
+    if cfg["eval_weights"] not in ("ema", "raw"):
+        raise ValueError("eval_weights must be ema or raw")
+    if int(cfg["reg_channels"]) < 0:
+        raise ValueError("reg_channels must be 0 (auto) or positive")
+    if not (float(cfg["muon_beta"]) == -1 or 0 <= float(cfg["muon_beta"]) < 1):
+        raise ValueError("muon_beta must be -1 (coupled) or in [0, 1)")
+    if int(cfg["muon_ns_steps"]) < 1 or int(cfg["muon_log_interval"]) < 0:
+        raise ValueError("muon_ns_steps must be positive and muon_log_interval nonnegative")
+    if cfg["muon_schedule"] not in ("constant", "linear"):
+        raise ValueError("muon_schedule must be constant or linear")
+    if cfg["muon_schedule"] == "linear":
+        if str(cfg["optimizer"]).lower() != "musgd":
+            raise ValueError("Muon taper requires optimizer=musgd")
+        start, end = int(cfg["muon_taper_start"]), int(cfg["muon_taper_end"])
+        if not 0 <= start < end - 1 < int(cfg["epochs"]):
+            raise ValueError("Muon taper requires 0 <= start < end-1 < epochs")
+    gains = [float(cfg[f"distill_{term}_weight"]) for term in ("feature", "cls", "box")]
+    if any(not 0 <= weight < float("inf") for weight in gains) or not 0 < float(cfg["distill_temperature"]) < float("inf"):
+        raise ValueError("distillation weights must be finite/nonnegative and temperature finite/positive")
+    if bool(cfg["teacher"]) != any(weight > 0 for weight in gains):
+        raise ValueError("distillation requires teacher=<checkpoint> AND at least one positive distill_*_weight")
+    if cfg["teacher"] and cfg["autobatch"]:
+        raise ValueError("distillation requires an explicit batch (autobatch does not account for teacher memory)")
+    if float(cfg["label_smoothing"]) != 0:
+        raise ValueError("label_smoothing must be 0: smoothing quality targets is not supported")
+    if cfg["early_stop_metric"] == "val_loss" and not cfg["val_compute_loss"]:
+        raise ValueError("early_stop_metric='val_loss' requires val_compute_loss=true")
+    if cfg["tune_metric"] == "val_loss" and not cfg["val_compute_loss"]:
+        raise ValueError("tune_metric='val_loss' requires val_compute_loss=true")
+    for key in ("epochs", "batch", "imgsz", "nbs", "tal_topk", "reg_max", "max_det"):
+        if int(cfg[key]) <= 0:
+            raise ValueError(f"config key '{key}' must be positive")
+    if int(cfg["reg_max"]) < 2:
+        raise ValueError("config key 'reg_max' must be at least 2")
+    if int(cfg["workers"]) < 0:
+        raise ValueError("config key 'workers' must be non-negative")
+    if not 0 < float(cfg["fraction"]) <= 1:
+        raise ValueError("config key 'fraction' must be in (0, 1]")
+    if cfg["cache"] not in ("none", "ram", "disk"):
+        raise ValueError("config key 'cache' must be one of: none, ram, disk")
+    if str(cfg["optimizer"]).lower() not in ("auto", "sgd", "adamw", "musgd"):
+        raise ValueError("config key 'optimizer' must be one of: auto, sgd, adamw, musgd")
+    if float(cfg["muon_weight"]) < 0 or float(cfg["sgd_weight"]) < 0:
+        raise ValueError("config keys 'muon_weight' and 'sgd_weight' must be non-negative")
+    if cfg["early_stop_metric"] not in ("mAP50-95", "mAP50", "precision", "recall", "val_loss"):
+        raise ValueError("unsupported early_stop_metric")
+    for key in (
+        "multiscale_prob", "label_smoothing", "mosaic", "mosaic9", "mixup", "copy_paste",
+        "flipud", "fliplr", "blur", "noise", "jpeg", "erasing", "min_box_visibility",
+        "conf", "val_conf", "iou", "confusion_conf", "confusion_iou",
+    ):
+        if not 0 <= float(cfg[key]) <= 1:
+            raise ValueError(f"config key '{key}' must be in [0, 1]")
+    if int(cfg["tracker_retries"]) < 0 or float(cfg["tracker_backoff"]) < 0:
+        raise ValueError("tracker retry settings must be non-negative")
+    bounds = cfg["multiscale_range"]
+    if len(bounds) != 2 or float(bounds[0]) <= 0 or float(bounds[0]) > float(bounds[1]):
+        raise ValueError("multiscale_range must be two positive ascending values")
 
 
 def find_model_cfg(name: str | Path) -> Path:

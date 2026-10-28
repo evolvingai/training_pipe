@@ -31,15 +31,20 @@ class Detect(nn.Module):
     """Per-scale decoupled cls/reg convs. Training: raw per-scale maps.
     Eval: additionally decodes to (B, 4 + nc, A) with xywh in input pixels."""
 
-    def __init__(self, nc: int, ch: tuple[int, ...] = (), reg_max: int = 16):
+    def __init__(self, nc: int, ch: tuple[int, ...] = (), reg_max: int = 16, reg_channels: int = 0):
         super().__init__()
         self.nc = nc
         self.nl = len(ch)
         self.reg_max = reg_max
         self.no = nc + reg_max * 4
-        self.stride = torch.zeros(self.nl)  # set by DetectionModel
+        self.in_channels = tuple(ch)
+        self.reg_channels_override = reg_channels
+        self.register_buffer("stride", torch.zeros(self.nl), persistent=False)  # set by DetectionModel
 
-        c2 = max(16, ch[0] // 4, reg_max * 4)
+        if reg_channels < 0:
+            raise ValueError("reg_channels must be nonnegative")
+        c2 = reg_channels or max(16, ch[0] // 4, reg_max * 4)
+        self.reg_channels = c2
         c3 = max(ch[0], min(nc, 100))
         self.reg_convs = nn.ModuleList(
             nn.Sequential(Conv(c, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * reg_max, 1)) for c in ch
@@ -60,10 +65,13 @@ class Detect(nn.Module):
             cls[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / float(s)) ** 2)
 
     def forward(self, xs: list[torch.Tensor]):
-        feats = [torch.cat((self.reg_convs[i](x), self.cls_convs[i](x)), 1) for i, x in enumerate(xs)]
+        feats = self.forward_raw(xs)
         if self.training:
             return feats
         return self.decode(feats), feats
+
+    def forward_raw(self, xs: list[torch.Tensor]):
+        return [torch.cat((self.reg_convs[i](x), self.cls_convs[i](x)), 1) for i, x in enumerate(xs)]
 
     def decode(self, feats: list[torch.Tensor]) -> torch.Tensor:
         anchors, strides = make_anchors(feats, self.stride, 0.5)

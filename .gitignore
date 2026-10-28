@@ -9,7 +9,7 @@ venv/
 *.egg-info/
 node_modules/
 .automation-data/
-data/
+/data/
 runs/
 dist/
 build/

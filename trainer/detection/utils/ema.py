@@ -23,7 +23,11 @@ class ModelEMA:
 
     @staticmethod
     def _unwrap(model: nn.Module) -> nn.Module:
-        return getattr(model, "_orig_mod", model)
+        while True:
+            unwrapped = getattr(model, "module", getattr(model, "_orig_mod", model))
+            if unwrapped is model:
+                return model
+            model = unwrapped
 
     def _decay(self) -> float:
         return self.decay_max * (1 - math.exp(-self.step_count / max(self.warmup_steps, 1)))
@@ -33,7 +37,7 @@ class ModelEMA:
         self.step_count += 1
         d = self._decay()
         msd = self._unwrap(model).state_dict()
-        for k, v in self.ema.state_dict().items():
+        for k, v in self._unwrap(self.ema).state_dict().items():
             if v.dtype.is_floating_point:
                 v.mul_(d).add_(msd[k].detach().to(v.dtype), alpha=1 - d)
             else:
@@ -41,14 +45,14 @@ class ModelEMA:
 
     def state_dict(self) -> dict:
         return {
-            "ema": self.ema.state_dict(),
+            "ema": self._unwrap(self.ema).state_dict(),
             "step_count": self.step_count,
             "decay_max": self.decay_max,
             "warmup_steps": self.warmup_steps,
         }
 
     def load_state_dict(self, state: dict) -> None:
-        self.ema.load_state_dict(state["ema"])
+        self._unwrap(self.ema).load_state_dict(state["ema"])
         self.step_count = state["step_count"]
         self.decay_max = state["decay_max"]
         self.warmup_steps = state["warmup_steps"]

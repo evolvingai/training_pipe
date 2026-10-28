@@ -3,11 +3,9 @@ import random
 import numpy as np
 import pytest
 
-from trainer.augmentation import TRANSFORMS as SHARED_TRANSFORMS
-from trainer.augmentation import Compose, load_augmentation_config
-from trainer.detection.augment import TRANSFORMS, build_pipeline, pipeline_from_spec
-from trainer.detection.augment.geometric import LetterBox, RandomFlip, RandomPerspective, SquareCrop
-from trainer.detection.augment.photometric import GaussNoise, JPEGArtifacts, MotionBlur, RandomHSV
+from trainer.augmentation import TRANSFORMS, build_pipeline, pipeline_from_spec
+from trainer.augmentation.geometric import LetterBox, RandomFlip, RandomPerspective, SquareCrop
+from trainer.augmentation.photometric import GaussNoise, JPEGArtifacts, MotionBlur, RandomHSV
 from trainer.detection.config import load_config
 
 
@@ -77,22 +75,6 @@ def test_registry_contains_all_builtins():
                  "RandomFlip", "RandomHSV", "MotionBlur", "GaussNoise", "JPEGArtifacts",
                  "RandomErasing", "SquareCrop", "BrightnessContrast"):
         assert name in TRANSFORMS
-    assert TRANSFORMS is SHARED_TRANSFORMS
-
-
-def test_external_augmentation_profile(tmp_path):
-    profile = tmp_path / "robust.toml"
-    profile.write_text("[augmentation]\nmixup = 0.4\nblur = 0.2\nfliplr = 0.8\n")
-    assert load_augmentation_config(profile) == {"mixup": 0.4, "blur": 0.2, "fliplr": 0.8}
-
-
-def test_sequence_uses_identical_random_geometry():
-    first = make_sample()
-    second = make_sample()
-    pipeline = Compose([RandomFlip("horizontal", p=0.5)], seed=1)
-    output = pipeline.apply_many([first, second])
-    assert np.array_equal(output[0]["image"], output[1]["image"])
-    assert np.array_equal(output[0]["boxes"], output[1]["boxes"])
 
 
 def test_pipeline_from_spec():

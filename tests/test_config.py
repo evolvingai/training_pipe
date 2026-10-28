@@ -16,17 +16,31 @@ def test_override_merge_and_coercion():
     assert cfg["amp"] is False
 
 
-def test_detector_loads_external_shared_augmentation_profile(tmp_path):
-    profile = tmp_path / "augment.toml"
-    profile.write_text("[augmentation]\nmosaic = 0.25\nblur = 0.4\n")
-    cfg = load_config({"augmentation_config": str(profile), "mosaic": 0.75})
-    assert cfg["mosaic"] == 0.75  # explicit option wins
-    assert cfg["blur"] == 0.4
-
-
 def test_unknown_key_raises():
     with pytest.raises(KeyError):
         load_config({"epochz": 10})
+
+
+def test_musgd_optimizer_and_blend_weights():
+    cfg = load_config({"optimizer": "musgd", "muon_weight": "0.5", "sgd_weight": "0.75"})
+    assert cfg["optimizer"] == "musgd"
+    assert cfg["muon_weight"] == 0.5 and isinstance(cfg["muon_weight"], float)
+    assert cfg["sgd_weight"] == 0.75
+
+
+@pytest.mark.parametrize("overrides", [
+    {"task": "classify"},
+    {"batch": 0},
+    {"fraction": 1.1},
+    {"mosaic": -0.1},
+    {"cache": "maybe"},
+    {"optimizer": "muon"},
+    {"muon_weight": -0.1},
+    {"sgd_weight": -1.0},
+])
+def test_invalid_config_rejected(overrides):
+    with pytest.raises(ValueError):
+        load_config(overrides)
 
 
 def test_non_strict_merge_accepts_new_keys():

@@ -14,6 +14,17 @@ from trainer.detection.utils.logging import LOGGER
 PARITY_ATOL = {"fp32": 1e-4, "fp16": 5e-3}
 
 
+def write_postprocess_config(artifact: Path, cfg: dict, names: dict) -> Path:
+    """Describe NMS outside the exported graph so consumers can reproduce prediction."""
+    from trainer.detection.utils.provenance import write_json
+    path = Path(str(artifact) + ".json")
+    write_json(path, {
+        "output": "decoded_xywh_class_scores", "nms_in_graph": False, "names": names,
+        "postprocess": {key: cfg[key] for key in ("conf", "iou", "max_det", "nms_multi_label")},
+    })
+    return path
+
+
 class _ExportWrapper(torch.nn.Module):
     """Eval-mode forward that returns only the decoded (B, 4+nc, A) tensor."""
 
@@ -33,7 +44,7 @@ def export_onnx(model, imgsz: int = 640, opset: int = 17, dynamic: bool = False,
     model = copy.deepcopy(model).float().eval().to(device)
     model.fuse()
     wrapper = _ExportWrapper(model)
-    dummy = torch.zeros(1, 3, imgsz, imgsz, device=device)
+    dummy = torch.zeros(1, int(getattr(model, "ch", 3)), imgsz, imgsz, device=device)
     dynamic_axes = None
     if dynamic:
         dynamic_axes = {"images": {0: "batch"}, "output": {0: "batch"}}
@@ -51,7 +62,8 @@ def export_onnx(model, imgsz: int = 640, opset: int = 17, dynamic: bool = False,
 
 
 def verify_onnx_parity(model, onnx_path: str | Path, imgsz: int = 640, atol: float | None = None,
-                       n_samples: int = 4, seed: int = 0) -> float:
+                       n_samples: int = 4, seed: int = 0,
+                       batch_sizes: tuple[int, ...] = (1,)) -> float:
     """Compare ONNX Runtime output against the source model. Returns max abs diff.
 
     Raises RuntimeError when the parity gate fails.
@@ -69,12 +81,17 @@ def verify_onnx_parity(model, onnx_path: str | Path, imgsz: int = 640, atol: flo
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     rng = np.random.default_rng(seed)
     max_diff = 0.0
-    for _ in range(n_samples):
-        x = rng.random((1, 3, imgsz, imgsz), dtype=np.float32)
-        with torch.no_grad():
-            ref, _ = model(torch.from_numpy(x))
-        out = sess.run(None, {"images": x})[0]
-        max_diff = max(max_diff, float(np.abs(ref.numpy() - out).max()))
+    for batch in batch_sizes:
+        if batch <= 0:
+            raise ValueError("parity batch sizes must be positive")
+        for _ in range(n_samples):
+            x = rng.random((batch, int(getattr(model, "ch", 3)), imgsz, imgsz), dtype=np.float32)
+            with torch.no_grad():
+                ref, _ = model(torch.from_numpy(x))
+            out = sess.run(None, {"images": x})[0]
+            if out.shape != tuple(ref.shape):
+                raise RuntimeError(f"ONNX parity gate failed: shape {out.shape} != {tuple(ref.shape)}")
+            max_diff = max(max_diff, float(np.abs(ref.numpy() - out).max()))
     if max_diff > atol:
         raise RuntimeError(f"ONNX parity gate failed: max abs diff {max_diff:.2e} > atol {atol:.0e}")
     LOGGER.info(f"ONNX parity OK: max abs diff {max_diff:.2e} (atol {atol:.0e})")
@@ -83,24 +100,21 @@ def verify_onnx_parity(model, onnx_path: str | Path, imgsz: int = 640, atol: flo
 
 def export_tensorrt(onnx_path: str | Path, half: bool = False, int8: bool = False,
                     workspace_gb: int = 4, calib_images: list[str] | None = None,
-                    imgsz: int = 640, out_path: str | Path | None = None,
-                    profile_shapes: dict[str, tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]] | None = None,
-                    max_batch: int = 8) -> Path:
-    """Build a TensorRT engine from an ONNX file ([deploy] extra, needs a GPU).
+                    imgsz: int = 640, out_path: str | Path | None = None) -> Path:
+    """Build a TensorRT engine from an ONNX file ([tensorrt] extra, needs a GPU).
 
-    Compatible with TensorRT 8.x through 11.x:
+    Compatible with TensorRT 8.x and 10.x:
     - TRT 10 removed the EXPLICIT_BATCH network flag (now always on by default).
     - TRT 10 removed builder.platform_has_fast_fp16/int8; precision flags are set
       unconditionally and TRT handles capability checking internally.
     """
     try:
-        import tensorrt as trt  # deferred: [deploy] extra
+        import tensorrt as trt  # deferred: [tensorrt] extra
     except ImportError as e:
         raise ImportError(
-            "tensorrt is required for engine export: pip install -e '.[deploy]'"
+            "tensorrt is required for engine export: pip install -e '.[tensorrt]'"
         ) from e
 
-    trt_version = tuple(int(x) for x in trt.__version__.split(".")[:2])
     LOGGER.info(f"TensorRT version: {trt.__version__}")
 
     onnx_path = Path(onnx_path)
@@ -117,42 +131,21 @@ def export_tensorrt(onnx_path: str | Path, half: bool = False, int8: bool = Fals
         network = builder.create_network()
 
     parser = trt.OnnxParser(network, logger)
-    # parse_from_file resolves ONNX external-data sidecars (common for VLMs).
-    parsed = (
-        parser.parse_from_file(str(onnx_path))
-        if hasattr(parser, "parse_from_file")
-        else parser.parse(onnx_path.read_bytes())
-    )
-    if not parsed:
+    if not parser.parse(onnx_path.read_bytes()):
         errors = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"TensorRT ONNX parse failed: {errors}")
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gb << 30)
-
-    # TensorRT requires an optimization profile for every dynamic input.  The
-    # classification and video exporters use a dynamic batch dimension; VLMs
-    # can additionally expose a dynamic token dimension.  Explicit profiles
-    # win, otherwise preserve every static dimension and scale batch only.
-    dynamic_inputs = []
-    for index in range(network.num_inputs):
-        tensor = network.get_input(index)
-        shape = tuple(int(value) for value in tensor.shape)
-        if any(value < 0 for value in shape):
-            dynamic_inputs.append((tensor.name, shape))
-    if dynamic_inputs:
+    input_tensor = network.get_input(0)
+    input_shape = tuple(input_tensor.shape)
+    if any(dim == -1 for dim in input_shape):
         profile = builder.create_optimization_profile()
-        for input_name, shape in dynamic_inputs:
-            values = profile_shapes.get(input_name) if profile_shapes else None
-            if values is None:
-                base = tuple(1 if value < 0 else value for value in shape)
-                optimum = list(base); maximum = list(base)
-                if shape and shape[0] < 0:
-                    optimum[0] = min(4, max_batch); maximum[0] = max_batch
-                values = (base, tuple(optimum), tuple(maximum))
-            accepted = profile.set_shape(input_name, *values)
-            # TensorRT 11 returns None on success; older versions returned bool.
-            if accepted is False:
-                raise RuntimeError(f"invalid TensorRT optimization profile for {input_name}: {values}")
+        fixed = tuple(
+            (1 if i == 0 else imgsz if i >= 2 else max(int(dim), 1))
+            for i, dim in enumerate(input_shape)
+        )
+        maximum = (16, *fixed[1:])
+        profile.set_shape(input_tensor.name, fixed, fixed, maximum)
         config.add_optimization_profile(profile)
 
     # platform_has_fast_fp16/int8 removed in TRT 10; fall back to True (TRT handles internally).
@@ -160,23 +153,13 @@ def export_tensorrt(onnx_path: str | Path, half: bool = False, int8: bool = Fals
     has_int8 = getattr(builder, "platform_has_fast_int8", True)
 
     if half and has_fp16:
-        fp16_flag = getattr(trt.BuilderFlag, "FP16", None)
-        if fp16_flag is None:
-            raise RuntimeError(
-                "TensorRT 11 removed the weakly-typed FP16 builder flag; export FP32 or provide an explicitly "
-                "FP16-typed ONNX graph"
-            )
-        config.set_flag(fp16_flag)
+        config.set_flag(trt.BuilderFlag.FP16)
     if int8 and has_int8:
-        int8_flag = getattr(trt.BuilderFlag, "INT8", None)
-        if int8_flag is None:
-            raise RuntimeError(
-                "TensorRT 11 removed the weakly-typed INT8 builder flag; provide an explicitly quantized ONNX graph"
-            )
-        config.set_flag(int8_flag)
-        if calib_images:
-            config.int8_calibrator = _EntropyCalibrator(calib_images, imgsz,
-                                                        cache=str(onnx_path.with_suffix(".calib")))
+        if not calib_images:
+            raise ValueError("int8=true requires calib_images for calibration")
+        config.set_flag(trt.BuilderFlag.INT8)
+        config.int8_calibrator = _EntropyCalibrator(calib_images, imgsz,
+                                                    cache=str(onnx_path.with_suffix(".calib")))
     engine = builder.build_serialized_network(network, config)
     if engine is None:
         raise RuntimeError("TensorRT engine build failed")
@@ -190,7 +173,7 @@ def _make_entropy_calibrator_class():
         import tensorrt as trt
     except ImportError as e:
         raise ImportError(
-            "tensorrt is required for INT8 calibration: pip install -e '.[deploy]'"
+            "tensorrt is required for INT8 calibration: pip install -e '.[tensorrt]'"
         ) from e
 
     class EntropyCalibrator(trt.IInt8EntropyCalibrator2):
@@ -201,7 +184,7 @@ def _make_entropy_calibrator_class():
                 import pycuda  # noqa: F401
             except ImportError as e:
                 raise ImportError(
-                    "pycuda is required for INT8 calibration: pip install -e '.[deploy]'"
+                    "pycuda is required for INT8 calibration: pip install -e '.[tensorrt]'"
                 ) from e
 
             self.cv2 = cv2
@@ -221,7 +204,7 @@ def _make_entropy_calibrator_class():
                 import pycuda.driver as cuda
             except ImportError as e:
                 raise ImportError(
-                    "pycuda is required for INT8 calibration: pip install -e '.[deploy]'"
+                    "pycuda is required for INT8 calibration: pip install -e '.[tensorrt]'"
                 ) from e
 
             if self.index + self.batch > len(self.paths):
@@ -229,6 +212,8 @@ def _make_entropy_calibrator_class():
             imgs = []
             for p in self.paths[self.index:self.index + self.batch]:
                 img = self.cv2.imread(p)
+                # calibrate on the same RGB the model is trained and served with
+                img = self.cv2.cvtColor(img, self.cv2.COLOR_BGR2RGB)
                 img = self.cv2.resize(img, (self.imgsz, self.imgsz))
                 imgs.append(img.transpose(2, 0, 1).astype(np.float32) / 255.0)
             self.index += self.batch
@@ -248,4 +233,4 @@ def _make_entropy_calibrator_class():
 
 
 def _EntropyCalibrator(image_paths: list[str], imgsz: int, cache: str):
-    return _make_entropy_calibrator_class()(image_paths, imgsz, cache)
+    return _make_entropy_calibrator_class()(image_paths, imgsz, cache, batch=min(8, len(image_paths)))

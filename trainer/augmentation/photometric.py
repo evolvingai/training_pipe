@@ -21,14 +21,14 @@ class RandomHSV(Transform):
             return sample
         gains = np.array([rng.uniform(-1, 1) * self.h, rng.uniform(-1, 1) * self.s,
                           rng.uniform(-1, 1) * self.v]) + 1
-        hsv = cv2.cvtColor(sample["image"], cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(sample["image"], cv2.COLOR_RGB2HSV)
         h, s, v = cv2.split(hsv)
         x = np.arange(256)
         lut_h = ((x * gains[0]) % 180).astype(np.uint8)
         lut_s = np.clip(x * gains[1], 0, 255).astype(np.uint8)
         lut_v = np.clip(x * gains[2], 0, 255).astype(np.uint8)
         hsv = cv2.merge((cv2.LUT(h, lut_h), cv2.LUT(s, lut_s), cv2.LUT(v, lut_v)))
-        sample["image"] = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        sample["image"] = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
         return sample
 
 

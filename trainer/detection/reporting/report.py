@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -24,11 +25,8 @@ def generate_report(run_dir: str | Path, result: dict, names: dict[int, str], cf
                     plots_dir: str | Path | None = None) -> Path:
     run_dir = Path(run_dir)
     plots_dir = Path(plots_dir) if plots_dir else run_dir / "plots"
-    # relative path from reports/ to plots/
-    try:
-        plots_rel = plots_dir.relative_to(run_dir / "reports")
-    except ValueError:
-        plots_rel = Path("../plots")
+    out_path = run_dir / out_name
+    plots_rel = Path(os.path.relpath(plots_dir, out_path.parent))
 
     lines: list[str] = []
 
@@ -53,6 +51,39 @@ def generate_report(run_dir: str | Path, result: dict, names: dict[int, str], cf
         ),
         "",
     ]
+    if result.get("checkpoint"):
+        checkpoint = result["checkpoint"]
+        lines += ["", f"Checkpoint: {checkpoint['path']} (epoch {checkpoint['epoch']}, "
+                  f"{checkpoint['selection']}); SHA256: {checkpoint['sha256']}", ""]
+    if result.get("evaluation"):
+        meta = result["evaluation"]
+        lines += ["", f"Evaluator: {meta['version']}; primary: Trainer; max_det={meta['max_det']}.",
+                  f"P/R operating point: {meta['precision_recall']}.",
+                  f"Custom crowd policy: {meta['crowd_policy']}.",
+                  "Validation loss: " + (str(result["val_loss"]) if result.get("val_loss") is not None
+                                         else "not measured"), ""]
+    if "pycoco" in result:
+        official = result["pycoco"]
+        delta = result["pycoco_delta"]
+        lines += [
+            "## pycocotools Comparison",
+            "",
+            "Trainer metrics remain the primary validation result. The official evaluator used the same "
+            "post-NMS predictions and image IDs.",
+            "Official maxDets=[1,10,100]. Custom caps and crowd/ignore handling may differ; "
+            "the delta is not solely numerical error.",
+            "",
+            _md_table(
+                ["Metric", "Trainer", "pycocotools", "Delta (Trainer - official)"],
+                [
+                    ["AP50-95", f"{result['mAP50-95']:.4f}", f"{official['AP']:.4f}",
+                     f"{delta['AP50-95']:+.4f}"],
+                    ["AP50", f"{result['mAP50']:.4f}", f"{official['AP50']:.4f}",
+                     f"{delta['AP50']:+.4f}"],
+                ],
+            ),
+            "",
+        ]
 
     # per-class metrics
     lines += ["## Per-class Metrics", ""]
@@ -79,9 +110,15 @@ def generate_report(run_dir: str | Path, result: dict, names: dict[int, str], cf
     if thresholds:
         lines += ["## Per-class Confidence Thresholds", ""]
         t_rows = []
-        for name, diag in thresholds.get("diagnostics", {}).items():
-            t_rows.append([name, diag.get("threshold", "-"), diag.get("best_fitness", "-"),
-                           diag.get("precision", "-"), diag.get("recall", "-"), diag.get("status", "-")])
+        diagnostics = thresholds.get("diagnostics", {})
+        if diagnostics:
+            for name, diag in diagnostics.items():
+                t_rows.append([name, diag.get("threshold", "-"), diag.get("best_fitness", "-"),
+                               diag.get("precision", "-"), diag.get("recall", "-"),
+                               diag.get("status", "-")])
+        else:
+            values = thresholds.get("thresholds", thresholds)
+            t_rows.extend([name, value, "-", "-", "-", "-"] for name, value in values.items())
         lines.append(_md_table(["class", "threshold", "fitness", "P", "R", "status"], t_rows))
         lines.append("")
 
@@ -131,7 +168,6 @@ def generate_report(run_dir: str | Path, result: dict, names: dict[int, str], cf
             lines.append(f"![{title}]({plots_rel / fname})")
             lines.append("")
 
-    out_path = run_dir / out_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     LOGGER.info(f"report written: {out_path}")

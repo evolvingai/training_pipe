@@ -53,7 +53,7 @@ def _options(argv: list[str], params: dict[str, Any], names: Iterable[str]) -> N
 
 
 @register_task("detection", actions=("train", "finetune", "val", "predict", "export", "tune", "tune-thresh",
-                                                "report", "viz-augment", "bench-data"),
+                                                "report", "viz-augment", "bench-data", "bench-model"),
                default_architecture="trainer-n", description="Anchor-free Trainer detector.")
 def run_detection(action: str, params: dict[str, Any]) -> int:
     from trainer.detection.cli import main as detector_main

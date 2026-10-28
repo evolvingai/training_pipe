@@ -41,7 +41,7 @@ def test_loss_no_targets():
 def test_focal_option_changes_loss():
     model = DetectionModel("trainer-n", nc=3).train()
     torch.manual_seed(0)
-    x = torch.rand(1, 3, 96, 96)
+    x = torch.rand(2, 3, 96, 96)
     feats = model(x)
     bce = DetectionLoss(model, load_config())(feats, make_batch())[1][1]
     focal = DetectionLoss(model, load_config({"cls_loss": "focal"}))([f.detach() for f in feats],
